@@ -3,7 +3,7 @@ var module = { exports: {} }; var exports = module.exports;
 'use strict';
 const React = require('react');
 const h = React.createElement;
-const VERSION='0.3.6';
+const VERSION='0.3.7';
 const DRAFT_FIELDS=['title','description','trigger','inputs','outputs','steps','rules','limits','testPlan'];
 const NS='personal.skillFactory';
 const ID='personal-skill-factory';
@@ -110,10 +110,11 @@ function App(){
   if(!result||typeof result!=='object'||!response.ok||result.ok!==true)throw new Error(`HTTP ${response.status} · `+(result?.error||'服务器未返回成功结果')+(result?.requestId?` [请求编号 ${result.requestId}]`:''));
   return result.data;
  }
-  async function waitForJob(id,timeoutMs=540000){
+  async function waitForJob(id,timeoutMs=540000,onProgress=null){
    // One-shot DSH calls are bounded at 120s; polling has extra leeway for queueing.
    for(const deadline=Date.now()+timeoutMs;Date.now()<deadline;){
     const job=await call('/job-status?id='+encodeURIComponent(id));
+    if(onProgress&&job.progress)onProgress(job.progress);
     if(job.status==='completed')return job;
     if(job.status==='failed')throw new Error((job.error||'后台模型任务执行失败')+' [请求编号 '+job.requestId+']');
     if(!['queued','running'].includes(job.status))throw new Error('未知归并任务状态：'+job.status);

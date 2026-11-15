@@ -197,3 +197,141 @@ test('eight extracted methods from one legacy document can produce one Skill blu
  snap=await f.architect.snapshot();
  assert.equal(snap.blueprints[pending.blueprintIds[0]].methodIds.length,8);
 });
+
+test('large book evidence is fully streamed in bounded batches and deduplicated before Skill planning',async t=>{
+ const f=await make(t);
+ const s=await f.architect.ingest({kind:'knowledge',title:'Large book',text:'reference '.repeat(2200)});
+ const longEvidence=new Map();
+ await f.engine.transact(db=>{
+   const a=architecture(db);
+   for(let i=0;i<28;i++){
+     const quote='evidence '+i+':'+String.fromCharCode(65+i%25).repeat(4450)+(i%2?'尾段':'末尾');
+     const id='extra-evidence-'+i;
+     a.evidence[id]={id,sourceId:s.id,quote,location:'chapter '+i,verified:true};
+     longEvidence.set(id,quote);
+     const mid='extra-method-'+i;
+     a.methods[mid]={id:mid,sourceId:s.id,name:'Step '+i,problem:'Audit recurring goals',rules:['Apply chapter '+i],evidenceIds:[id]};
+   }
+ });
+ const calls=[],allParts=new Map(),allMethods=new Set();
+ let batchNumber=0;
+ const model=async ({prompt})=>{
+   assert.ok(prompt.length<=67000,'never exceed the configured request ceiling');
+   calls.push(prompt);
+   if(prompt.includes('实现已批准蓝图')){
+     assert.ok(prompt.length<=34000,'skill generation must fit budget');
+     assert.match(prompt,/"evidenceCoverage"/);
+     assert.match(prompt,/"originalPreserved":true/);
+     return {text:JSON.stringify(generated)};
+   }
+   const data=extract(prompt);
+   if(prompt.includes('连续分批')){
+     batchNumber++;
+     for(const e of data.evidence){
+       if(!allParts.has(e.id))allParts.set(e.id,[]);
+       allParts.get(e.id).push(e);
+     }
+     for(const m of data.methods)allMethods.add(m.id);
+     const eids=[...new Set(data.evidence.map(e=>e.id))];
+     const mids=data.methods.map(m=>m.id);
+     const row=task('Audit goals',eids,true,mids);
+     return {text:JSON.stringify({tasks:[row]})};
+   }
+   if(prompt.includes('合并不同批次')){
+     return {text:JSON.stringify({groups:[{taskIds:data.tasks.map(t=>t.id)}]})};
+   }
+   if(prompt.includes('设计 Skill 蓝图')){
+     assert.ok(data.evidenceCoverage?.originalPreserved!==true,'architect blueprint uses its own manifest schema');
+     assert.equal(data.evidenceCoverage?.total,29);
+     assert.equal(data.selectedEvidence.length,29);
+     assert.ok(data.selectedEvidence.every(e=>e.excerptOnly && e.sha256));
+     return {text:JSON.stringify(spec)};
+   }
+   if(prompt.includes('将任务聚类')){
+     assert.equal(data.tasks.length,1,'the review should see ONE merged task');
+     return {text:JSON.stringify({capabilities:[{name:'Goal audit',taskIds:[data.tasks[0].id],decision:'CREATE',assetIds:[],reason:'One concrete repeatable task',alternatives:[{decision:'REFERENCE',reason:'Keep as knowledge only'}],assumptions:[],partitions:[]}]})};
+   }
+   throw Error('unexpected model stage');
+ };
+ const newArchitect=createArchitect(f.engine,model,async()=>({complete:true,skills:[]}));
+ const p=await newArchitect.plan({...consent,sourceIds:[s.id]});
+ assert.ok(batchNumber>=3);
+ assert.equal(p.planning.batchCount,batchNumber);
+ assert.equal(p.planning.mode,'batched');
+ assert.equal(p.planning.complete,true);
+ assert.equal(p.taskIds.length,1);
+ assert.equal(p.capabilityIds.length,1);
+ assert.equal(allMethods.size,28);
+ for(const [id,original] of longEvidence){
+   const fragments=allParts.get(id)||[];
+   assert.ok(fragments.length>=2,'long evidence must be split');
+   assert.equal(fragments.sort((a,b)=>a.part-b.part).map(x=>x.quote).join(''),original);
+ }
+ const snap=await newArchitect.snapshot();
+ const merged=snap.tasks[p.taskIds[0]];
+ assert.equal(merged.methodIds.length,28);
+ assert.ok(merged.evidenceIds.length>=28);
+ assert.equal(snap.capabilities[p.capabilityIds[0]].decision,'CREATE');
+ const pending=await newArchitect.prepare({...consent,planId:p.id,revision:1});
+ assert.equal(pending.blueprintIds.length,1);
+ const bp=(await newArchitect.snapshot()).blueprints[pending.blueprintIds[0]];
+ assert.equal(bp.evidenceContextMode,'manifest');
+ assert.ok(bp.evidenceIds.length>=28);
+ await newArchitect.approve({planId:p.id,revision:2,approved:true});
+ const realGenerator=createBlueprintGenerator(f.engine,model);
+ const output=await realGenerator({...consent,blueprintId:bp.id});
+ assert.ok(output.slug,'large evidence must not block generation');
+
+});
+
+test('incomplete reconciliation is rejected without saving a misleading architecture',async t=>{
+ const f=await make(t);
+ const s=await f.architect.ingest({kind:'knowledge',title:'Big evidence',text:'reference '.repeat(2200)});
+ await f.engine.transact(db=>{
+   const a=architecture(db);
+   for(let i=0;i<20;i++)a.evidence['large-'+i]={id:'large-'+i,sourceId:s.id,quote:('data'+i).repeat(1100),location:'chapter '+i,verified:true};
+ });
+ const model=async ({prompt})=>{
+   const data=extract(prompt);
+   if(prompt.includes('连续分批'))return {text:JSON.stringify({tasks:[task('Task '+data.evidence[0]?.id,[data.evidence[0]?.id].filter(Boolean))]})};
+   if(prompt.includes('合并不同批次'))return {text:JSON.stringify({groups:[{taskIds:[data.tasks[0].id]}]})};
+   throw Error('unexpected stage');
+ };
+ await assert.rejects(createArchitect(f.engine,model,async()=>({complete:true,skills:[]})).plan({...consent,sourceIds:[s.id]}),/遗漏|覆盖/);
+ assert.equal(Object.keys((await f.architect.snapshot()).plans).length,0);
+});
+
+test('planning resumes completed batches after a real model interruption, without faking complete coverage',async t=>{
+ const f=await make(t);
+ const s=await f.architect.ingest({kind:'knowledge',title:'Resumable book',text:'reference '.repeat(2200)});
+ await f.engine.transact(db=>{
+   const a=architecture(db);
+   a.sources[s.id].truncated=true;
+   for(let i=0;i<16;i++)a.evidence['resume-'+i]={id:'resume-'+i,sourceId:s.id,quote:('record '+i).repeat(1250),location:'page '+i,verified:true};
+ });
+ const seen=[],model=async ({prompt})=>{
+   const data=extract(prompt);
+   if(prompt.includes('连续分批')){
+     const batch=Number(prompt.match(/第 (\d+)\//)[1]);
+     seen.push(batch);
+     if(batch===2&&seen.filter(x=>x===2).length===1)throw Error('simulated one-shot provider failure');
+     return {text:JSON.stringify({tasks:[task('Review records',data.evidence.length?[data.evidence[0].id]:[],true)]})};
+   }
+   if(prompt.includes('合并不同批次'))return {text:JSON.stringify({groups:[{taskIds:data.tasks.map(t=>t.id)}]})};
+   if(prompt.includes('将任务聚类'))return {text:JSON.stringify({capabilities:[{name:'Record review',taskIds:data.tasks.map(x=>x.id),decision:'CREATE',assetIds:[],reason:'Same output',alternatives:[{decision:'REFERENCE',reason:'Optional knowledge'}],assumptions:[],partitions:[]}]})};
+   throw Error('unexpected stage');
+ };
+ const architect=createArchitect(f.engine,model,async()=>({complete:true,skills:[]}));
+ const args={...consent,sourceIds:[s.id]};
+ await assert.rejects(architect.plan(args),/provider failure/);
+ assert.equal(seen.filter(x=>x===1).length,1);
+ assert.ok(Object.keys((await f.engine.state()).architecture.planningCheckpoints||{}).length);
+ const progress=[];
+ const plan=await architect.plan({...args,onProgress:p=>progress.push(p)});
+ assert.equal(seen.filter(x=>x===1).length,1,'first completed batch should be reused, not paid twice');
+ assert.ok(seen.filter(x=>x===2).length===2);
+ assert.ok(progress.some(p=>p.stage==='reconcile'));
+ assert.equal(plan.planning.complete,false,'truncated imported source must not claim complete source coverage');
+ assert.deepEqual(plan.planning.truncatedSourceIds,[s.id]);
+ assert.equal(Object.keys((await f.engine.state()).architecture.planningCheckpoints||{}).length,0);
+});
