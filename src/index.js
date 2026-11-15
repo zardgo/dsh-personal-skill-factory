@@ -2,6 +2,8 @@ import { createEvalService } from './eval-service.mjs';
 import { createOptimizer } from './optimizer.mjs';
 import { createArchitect } from './architect.mjs';
 import { createBlueprintGenerator } from './blueprint-generator.mjs';
+import { createKnowledgeService } from './knowledge-service.mjs';
+import { createTaskFlow } from './task-flow.mjs';
 import { createEngine } from './engine.mjs';
 import { oneShot, availableModels } from './model.mjs';
 import { VERSION } from './version.mjs';
@@ -36,11 +38,15 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
  const generate=createBlueprintGenerator(engine,runner);
  const evals=createEvalService(engine,runner);
  const optimizer=createOptimizer(engine,runner);
+ const knowledge=createKnowledgeService(engine,runner);
+ const tasks=createTaskFlow(engine,runner,catalog,knowledge);
  const operations={
   'optimizer-propose':x=>optimizer.propose(x),
   'optimizer-trial':x=>optimizer.trial(x),
   'eval-v2-execution':x=>evals.execution(x),
   'eval-v2-suite':x=>evals.suiteExecution(x),
+  'knowledge-answer':x=>knowledge.answer(x),
+  'task-plan':x=>tasks.plan(x),
   'architect-plan':x=>architect.plan(x),
   'architect-optimize':x=>architect.optimize(x),
   'architect-prepare':x=>architect.prepare(x),
@@ -57,9 +63,9 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
   if(!Object.hasOwn(operations,operation))throw fail('不支持的后台任务',422);
   if(input.allowModelSend!==true)throw fail('开始模型任务之前必须确认发送所选内容',403);
   if(typeof slug!=='string'||!slug)throw fail('缺少项目标识',422);
-  if(operation!=='model-eval'&&!operation.startsWith('architect-')&&!operation.startsWith('eval-v2-')&&!operation.startsWith('optimizer-')&&(typeof documentId!=='string'||!documentId))throw fail('缺少文档标识',422);
+  if(operation!=='model-eval'&&operation!=='task-plan'&&operation!=='knowledge-answer'&&!operation.startsWith('architect-')&&!operation.startsWith('eval-v2-')&&!operation.startsWith('optimizer-')&&(typeof documentId!=='string'||!documentId))throw fail('缺少文档标识',422);
   const key=JSON.stringify([operation,slug,documentId||null]);
-  const signature=JSON.stringify([input.provider,input.model,input.revision,input.startChunk,input.startCase,input.groupId,input.chunkIndex,input.methodName,input.regenerate,input.planId,input.blueprintId,input.sourceIds,input.edits,input.cwd,input.caseId,input.proposalId,input.intent,input.caseIds]);
+  const signature=JSON.stringify([input.provider,input.model,input.revision,input.startChunk,input.startCase,input.groupId,input.chunkIndex,input.methodName,input.regenerate,input.planId,input.blueprintId,input.sourceIds,input.edits,input.cwd,input.caseId,input.proposalId,input.intent,input.caseIds,input.goal,input.context,input.query,input.projectSlug,input.documentId]);
   const existing=jobs.get(byKey.get(key));
   if(existing){
    if(existing.signature!==signature)throw fail('同项目有另一项同类任务在运行，请等待其保存结果',409);
@@ -72,7 +78,7 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
    try{
     const result=await operations[operation](operation==='architect-plan'
       ? {...input,onProgress:progress=>{job.progress=progress;}} : input);
-    if(operation==='propose'||operation.startsWith('architect-')||operation.startsWith('eval-v2-'))job.result=result;
+    if(operation==='propose'||operation.startsWith('architect-')||operation.startsWith('eval-v2-')||operation==='task-plan'||operation==='knowledge-answer')job.result=result;
     job.status='completed';
    }catch(err){
     job.status='failed';
@@ -100,6 +106,10 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
   '/eval-v2/approve':['POST',x=>evals.approve(x)],
   '/eval-v2/stage':['POST',x=>evals.stage(x)],
   '/eval-v2/trigger':['POST',x=>evals.trigger(x)],
+  '/knowledge/documents':['GET',()=>knowledge.documents()],
+  '/knowledge/search':['POST',x=>knowledge.search(x)],
+  '/task/history':['GET',()=>tasks.recent()],
+  '/task/accept':['POST',x=>tasks.accept(x)],
   '/architecture':['GET',()=>architect.snapshot()],
   '/architecture/migrate':['POST',()=>architect.migrate()],
   '/architecture/ingest':['POST',x=>architect.ingest(x)],
@@ -110,7 +120,7 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
   '/job-start':['POST',startJob],'/job-status':['GET',jobStatus],'/eval-progress':['GET',x=>engine.evaluationProgress(x)],'/fork':['POST',()=>{throw fail('禁止绕过能力架构直接派生 Skill；历史候选不会删除',409)}],
   '/proposals':['GET',x=>engine.proposalRecords(x.slug,x.documentId)],
   '/models':['GET',()=>availableModels(modelContext)],
-  '/info':['GET',()=>({storageRoot:engine.root,publishRoot:engine.publishRoot,version:VERSION,capabilities:{backgroundSynthesis:true,backgroundEvals:true,jobPolling:true,derivedSkills:true,revisionGuard:true,optimizationTrials:true,independentRiskAudit:true,helpDock:true,unifiedArchitectureFlow:true,portfolioOptimizer:true},modelEvaluation:'dsh-native-when-configured',uploads:['pdf','epub','docx','txt','md'],environment:'DSH Host'})],
+  '/info':['GET',()=>({storageRoot:engine.root,publishRoot:engine.publishRoot,version:VERSION,capabilities:{backgroundSynthesis:true,backgroundEvals:true,jobPolling:true,derivedSkills:true,revisionGuard:true,optimizationTrials:true,independentRiskAudit:true,helpDock:true,unifiedArchitectureFlow:true,portfolioOptimizer:true,knowledgeSearch:true,taskFirst:true},modelEvaluation:'dsh-native-when-configured',uploads:['pdf','epub','docx','txt','md'],environment:'DSH Host'})],
  };
  const handle=async function(path,req){
   const requestId=crypto.randomUUID();const route=routes[path];

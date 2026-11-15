@@ -10,9 +10,11 @@ for (const name of (await readdir('src')).filter(name=>!name.startsWith('._')&&/
     const client=await readFile('src/client.js','utf8');
     const panel=await readFile('src/architect-panel.js','utf8');
     const evalPanel=await readFile('src/eval-panel.js','utf8');
+    const knowledgePanel=await readFile('src/knowledge-panel.js','utf8');
+    const taskPanel=await readFile('src/task-panel.js','utf8');
     const help=(await import('../src/help-content.mjs')).HELP_CONTENT;
     const faq=(await import('../src/help-content.mjs')).HELP_FAQ;
-    await writeFile('lib/client.js',client.replace('/* HELP_CONTENT */',()=>`const HELP_CONTENT=${JSON.stringify(help)};\nconst HELP_FAQ=${JSON.stringify(faq)};`).replace('/* ARCHITECT_PANEL */',()=>panel+'\n'+evalPanel));
+    await writeFile('lib/client.js',client.replace('/* HELP_CONTENT */',()=>`const HELP_CONTENT=${JSON.stringify(help)};\nconst HELP_FAQ=${JSON.stringify(faq)};`).replace('/* ARCHITECT_PANEL */',()=>panel+'\n'+evalPanel).replace('/* KNOWLEDGE_TASK_PANELS */',()=>knowledgePanel+'\n'+taskPanel));
   }else await copyFile('src/' + name, 'lib/' + name);
   const result = spawnSync(process.execPath, ['--check', 'lib/' + name], { stdio: 'inherit' });
   if (result.status !== 0) process.exit(result.status ?? 1);

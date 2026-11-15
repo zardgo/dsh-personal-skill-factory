@@ -1,3 +1,51 @@
+# DSH Skill Factory v0.4.0 — Knowledge → Task → Skill → Eval → Release
+
+> **候选版。** 已通过本地自动化测试；尚未在用户的真实 DSH Desktop / Host 上完成 UI、真实模型、Trigger 和 Execution 端到端验收。**不会自行创建、发布或覆盖已有 Skill。**
+
+## 产品方向（v0.4.0）
+
+Skill Factory 是可执行能力工厂，不是把一本书按章节或方法自动拆成多个 Skill 的工具。一本书默认是**知识资料**，一个明确、可验收的工作任务才可能需要 Skill。现有 DSH Agent 负责理解请求与调用工具；**不按一本书创建一个 Agent**。
+
+**日常三个入口：**
+
+1. **知识库**：创建资料项目、上传 PDF/EPUB/DOCX/TXT/MD；对本机已解析文本进行关键词检索，返回文件、SHA-256、解析文本偏移和原文短摘。**本地检索不调用模型**。选择模型并明确同意后，可仅发送当前问题和短摘，生成仍需核验的引用回答。
+2. **创建 / 改进 Skill**：描述一项真实任务，选填参考资料；先盘点 DSH 现有 Skill，再由模型推荐 `REUSE`、`ENHANCE`、`CREATE`、`REFERENCE` 或 `REVIEW`。仅 `CREATE` 且用户明确批准时创建一个**开发草稿**，不会发布，也不自动执行外部系统动作。已保存的方案可在历史中打开。
+3. **质量中心 / Skill 资产**：复用现有构建、评测、版本、回滚与人工审批能力。任务驱动新建草稿绑定**独立已批准蓝图 + 待审批的 v2 冻结评测套件**，须另行审批评测集并通过真实 Trigger / Execution A/B 与关键风险门禁才能发布。
+
+原来的「能力架构 / 自动组合优化」降为**高级**入口，源数据、项目、候选、版本和失败记录均原样保留。新版本没有清理旧分析，也不重跑历史模型任务。
+
+## 已知限制与诚实边界
+
+- 目前是**本地词法/字符片段检索**，不是向量数据库或成熟语义 RAG；偏移位置不是原书页码。扫描型 PDF、未能解析的资料、超过解析上限（80 万字）的内容不可冒充完整覆盖。
+- 单次任务建议由模型提出，安全/合法性和业务正确性需要用户审核。现有 Skill 盘点不完整则拒绝自动规划，不宣称已查重。
+- 任务草稿的六条初始测试只作为**待审批评测集**，不能把它们当成已完成真实 Evals。测试材料不足时，v2 预检可能标记 `INVALID_FIXTURE` 或 `NEEDS_REVIEW`，需要补齐材料并审批新版本；不能为了得分改动冻结断言。
+- 原有任务的公司级权限系统不由本插件控制。说明书或不同角色名称均不能作为真实写入权限的证明。
+- 本插件不自动常驻运行 Agent、定时监控、推送通知，也不调用云端知识向量服务。模型调用仍通过 DSH 已配置的提供商。
+
+## 本地安装 / 开发
+
+```bash
+npm run check
+npm pack --ignore-scripts
+# 关闭 DSH 后按本机 profile 安装 tgz：
+# dsh plugin --profile desktop remove dsh-personal-skill-factory
+# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.4.0.tgz
+```
+
+需要 Node.js >= 22.19.0，DSH 当前插件兼容版本见 `package.json`。业务数据在 `~/.dsh/skill-factory/`，正式升级之前应备份该目录。不要向 GitHub 上传本机 `state.json`、文档、会话记录或凭据。
+
+## 代码
+
+- `src/knowledge-service.mjs`：本地来源检索、片段引用与可选择的模型问答。
+- `src/task-flow.mjs`：真实任务诊断、现有 Skill 盘点与创建建议。
+- `src/engine.mjs` 的 `createFromTaskPlan`：经过批准才原子创建受 v2 Evals 门禁保护的草稿。
+- `src/knowledge-panel.js`、`src/task-panel.js`：默认日常界面，仍由原生 DSH Client + Host 加载。
+- `src/architect.mjs` 和原有 Evals：作为高级批量治理和质量基础设施保留。
+
+---
+
+## 旧版本与历史说明（留存追溯）
+
 # DSH Skill Factory v0.3.11（跨角色组合待审候选版）
 
 > 保留通用 Skill Architect 的业务模型，不对 OKR 书籍做特例；**仍需在用户 Mac 的真实 DSH 中验证**。不裁剪整本书，也不将不同任务为了凑 Skill 数量而合并。
