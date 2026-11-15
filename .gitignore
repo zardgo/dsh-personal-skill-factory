@@ -11,3 +11,4 @@ historical-trigger-replay.json
 .env.*
 !.env.example
 coverage/
+lib/
