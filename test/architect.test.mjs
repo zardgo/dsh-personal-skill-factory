@@ -142,3 +142,25 @@ test('host-only catalog reconciles a verified factory release without reading ex
  await writeFile(p,'externally changed');
  assert.deepEqual((await architect.inventory()).map(a=>a.id),['external']);
 });
+
+
+test('manual architecture edits cannot duplicate tasks or promote unverified reference into a Skill',async t=>{
+ const f=await make(t);
+ const s=await f.architect.ingest({kind:'knowledge',title:'Definitions',text:'A glossary of abbreviations.'});
+ await f.engine.transact(db=>{
+  const a=architecture(db);
+  a.tasks.t1={id:'t1',name:'Glossary',recurring:false,methodIds:[],evidenceIds:[]};
+  a.tasks.t2={id:'t2',name:'Notes',recurring:false,methodIds:[],evidenceIds:[]};
+  a.capabilities.c1={id:'c1',taskIds:['t1','t2'],decision:'REFERENCE',evidenceIds:[],reason:'Pure knowledge'};
+  a.plans.p1={id:'p1',status:'proposed',revision:1,sourceIds:[s.id],taskIds:['t1','t2'],capabilityIds:['c1'],inventory:[]};
+ });
+ const common={...consent,planId:'p1',revision:1};
+ await assert.rejects(f.architect.prepare({...common,edits:[
+  {capabilityIds:['c1'],taskIds:['t1'],name:'A',decision:'REFERENCE',reason:'Reference'},
+  {capabilityIds:['c1'],taskIds:['t1','t2'],name:'B',decision:'REJECT',reason:'Excluded'}
+ ]}),/恰好归属/);
+ await assert.rejects(f.architect.prepare({...common,edits:[
+  {capabilityIds:['c1'],taskIds:['t1','t2'],name:'Force new Skill',decision:'CREATE',reason:'Unverified request'}
+ ]}),/重复执行|证据/);
+ assert.equal(Object.keys((await f.architect.snapshot()).blueprints).length,0);
+});

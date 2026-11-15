@@ -185,13 +185,25 @@ export function createArchitect(engine, run, catalog) {
       const selected=ids(edit.taskIds,new Set(base.flatMap(x=>x.taskIds)));
       if(!selected.length||!decisions.includes(edit.decision))throw error('人工决策缺少任务或有效类型');
       if(edit.decision==='SPLIT')throw error('人工拆分请按子能力分别提交 CREATE 或 ENHANCE');
+      const assets=ids(edit.assetIds||[],new Set(p.inventory.map(x=>x.id)));
+      if(edit.decision==='REUSE'&&!assets.length)throw error('复用必须指定已盘点的目标资产');
+      if(edit.decision==='ENHANCE'&&(assets.length!==1||!p.inventory.find(x=>x.id===assets[0])?.managed))throw error('增强必须指向一个工厂管理的资产');
+      if(['CREATE','MERGE','ENHANCE'].includes(edit.decision)){
+        if(selected.some(id=>!a.tasks[id]?.recurring))throw error('待生成的任务必须可重复执行');
+        const evidence=selected.flatMap(id=>[...(a.tasks[id]?.evidenceIds||[]),...(a.tasks[id]?.methodIds||[]).flatMap(mid=>a.methods[mid]?.evidenceIds||[])]);
+        if(!evidence.some(id=>a.evidence[id]?.verified))throw error('待生成能力缺少可核查来源证据');
+      }
+      if(edit.decision==='MERGE'&&selected.length<2&&new Set(selected.flatMap(id=>a.tasks[id]?.methodIds||[])).size<2)throw error('合并必须包含多个真实任务或方法');
       const row={name:required(edit.name,'能力名称'),decision:edit.decision,taskIds:selected,
-        reason:required(edit.reason,'人工变更原因'),assetIds:ids(edit.assetIds||[],new Set(p.inventory.map(x=>x.id))),
+        reason:required(edit.reason,'人工变更原因'),assetIds:assets,
         alternatives:base.map(c=>({decision:c.decision,reason:c.reason})),assumptions:base.flatMap(c=>c.assumptions),
         evidenceIds:[...new Set(base.flatMap(c=>c.evidenceIds))],partitions:[],supersedes:refs};
       return {id:key('capability',row),...row};
     });
-    if(p.capabilityIds.some(id=>!used.has(id))||p.taskIds.some(id=>!final.some(c=>c.taskIds.includes(id))))throw error('每项候选和任务均需处理。排除请使用 REJECT');
+    const counts=new Map();
+    for(const c of final)for(const id of c.taskIds)counts.set(id,(counts.get(id)||0)+1);
+    if(p.capabilityIds.some(id=>!used.has(id))||p.taskIds.some(id=>counts.get(id)!==1)||
+       [...counts.keys()].some(id=>!p.taskIds.includes(id)))throw error('每个任务必须恰好归属一个最终能力。排除请使用 REJECT');
     return final;
   }
   async function prepare(input) {

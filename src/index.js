@@ -104,11 +104,11 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
   '/architecture/inventory':['POST',x=>architect.inventory(x.cwd)],
   '/architecture/approve':['POST',x=>architect.approve(x)],
   '/state':['GET',()=>engine.state()],'/create':['POST',x=>engine.create(x)],'/save':['POST',x=>engine.save(x)],'/lint':['POST',x=>engine.lint(x.slug)],'/build':['POST',x=>engine.build(x.slug)],'/publish':['POST',x=>engine.publish(x)],'/rollback':['POST',x=>engine.rollback(x)],
-  '/upload':['POST',x=>engine.upload(x)],'/analysis-reset':['POST',x=>engine.resetAnalysis(x)],'/analyze':['POST',x=>engine.analyze(x)],'/synthesize':['POST',x=>engine.synthesize(x)],'/synthesis-finalize':['POST',x=>engine.finalizeSynthesis(x)],'/propose':['POST',x=>startJob({...x,operation:'propose'})],'/model-eval':['POST',x=>engine.evaluate(x)],'/repair-proposal':['POST',x=>engine.repair(x)],
-  '/job-start':['POST',startJob],'/job-status':['GET',jobStatus],'/eval-progress':['GET',x=>engine.evaluationProgress(x)],'/fork':['POST',x=>engine.fork(x)],
+  '/upload':['POST',x=>engine.upload(x)],'/analysis-reset':['POST',x=>engine.resetAnalysis(x)],'/analyze':['POST',x=>engine.analyze(x)],'/synthesize':['POST',x=>engine.synthesize(x)],'/synthesis-finalize':['POST',x=>engine.finalizeSynthesis(x)],'/propose':['POST',()=>{throw fail('旧版按方法直接生成已停用；请在能力架构中统一规划并审批蓝图',409)}],'/model-eval':['POST',x=>engine.evaluate(x)],'/repair-proposal':['POST',x=>engine.repair(x)],
+  '/job-start':['POST',startJob],'/job-status':['GET',jobStatus],'/eval-progress':['GET',x=>engine.evaluationProgress(x)],'/fork':['POST',()=>{throw fail('禁止绕过能力架构直接派生 Skill；历史候选不会删除',409)}],
   '/proposals':['GET',x=>engine.proposalRecords(x.slug,x.documentId)],
   '/models':['GET',()=>availableModels(modelContext)],
-  '/info':['GET',()=>({storageRoot:engine.root,publishRoot:engine.publishRoot,version:VERSION,capabilities:{backgroundSynthesis:true,backgroundEvals:true,jobPolling:true,derivedSkills:true,revisionGuard:true,optimizationTrials:true,independentRiskAudit:true,helpDock:true},modelEvaluation:'dsh-native-when-configured',uploads:['pdf','epub','docx','txt','md'],environment:'DSH Host'})],
+  '/info':['GET',()=>({storageRoot:engine.root,publishRoot:engine.publishRoot,version:VERSION,capabilities:{backgroundSynthesis:true,backgroundEvals:true,jobPolling:true,derivedSkills:true,revisionGuard:true,optimizationTrials:true,independentRiskAudit:true,helpDock:true,unifiedArchitectureFlow:true},modelEvaluation:'dsh-native-when-configured',uploads:['pdf','epub','docx','txt','md'],environment:'DSH Host'})],
  };
  const handle=async function(path,req){
   const requestId=crypto.randomUUID();const route=routes[path];
