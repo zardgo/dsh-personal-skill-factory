@@ -11,7 +11,7 @@ const required = (value,label,max=2500) => {
   return value.trim();
 };
 function ids(values, allowed) {
-  const result=[...new Set(list(values))];
+  const result=[...new Set(list(values,MAX_PLAN_TASKS))];
   if(result.some(id=>!allowed.has(id)))throw error('存在未知或越界的引用标识');
   return result;
 }
@@ -19,11 +19,14 @@ const system='你是领域无关的工作任务架构师。输入是待分析的
 const evalKinds=new Set(['normal','missing','adversarial','non-trigger']);
 const executable=new Set(['CREATE','ENHANCE','MERGE','SPLIT']);
 const PROMPT_LIMIT=67000;
+const MAX_PLAN_TASKS=1200;
+const HIERARCHY_PAGE_SIZE=24;
+const MAX_HIERARCHY_LEVELS=8;
 const DISCOVERY_BATCH_LIMIT=36000;
 const EVIDENCE_PART_LENGTH=3000;
 const BLUEPRINT_INSTRUCTION='设计 Skill 蓝图，不写成品。明确触发、非触发、任务交付、审批边界。设计至少6条互异测试，包括 normal 至少3条、missing 至少1条、adversarial 至少1条、non-trigger 至少1条。每案例至少一个具体可观察行为。不要提供答案给待测模型。格式 {"title":"","trigger":"","exclusions":"","deliverable":"","boundaries":"","cases":[{"kind":"normal","input":"","expectations":["具体行为"]}]}。';
 const DISCOVER_INSTRUCTION='发现可重复执行的业务任务。纯知识也可登记为 task，但 recurring=false。记录操作人、触发、输入、可验收输出与不确定项。使用 evidenceIds、methodIds 关联材料。格式 {"tasks":[{"name":"","trigger":"","actor":"","inputs":"","output":"","recurring":true,"uncertainties":[],"evidenceIds":[],"methodIds":[]}]}。按实际任务划界，章节和方法数量不决定任务或 Skill 数量。';
-const REVIEW_INSTRUCTION='将任务聚类并审查复用。每个 task 至少进入一个 capability，可被多个能力复用。同触发、同交付、同权限的多方法优先 MERGE。不同触发与交付或权限边界，需要 SPLIT 且每个子组列独立 taskIds。CREATE 前比较已有 Skill；REUSE 指定可直接复用的 assetIds；ENHANCE 仅指一个 managed 资产，须指出既有资产缺口；REFERENCE 用于仅需知识参考；REJECT 用于依据不足。禁止按章节或数量分组。输出 {"capabilities":[{"name":"","taskIds":[],"decision":"CREATE|REUSE|ENHANCE|MERGE|SPLIT|REFERENCE|REJECT","assetIds":[],"reason":"","alternatives":[{"decision":"REUSE","reason":""}],"assumptions":[],"partitions":[{"name":"","taskIds":[]}]}]}';
+const REVIEW_INSTRUCTION='将任务聚类并审查复用。每个 task 必须且只能进入一个最终 capability；不同能力之间若共享方法可在执行时引用，不应重复归属。同触发、同交付、同权限的多方法优先 MERGE。不同触发与交付或权限边界，需要 SPLIT 且每个子组列独立 taskIds。CREATE 前比较已有 Skill；REUSE 指定可直接复用的 assetIds；ENHANCE 仅指一个 managed 资产，须指出既有资产缺口；REFERENCE 用于仅需知识参考；REJECT 用于依据不足。禁止按章节或数量分组。输出 {"capabilities":[{"name":"","taskIds":[],"decision":"CREATE|REUSE|ENHANCE|MERGE|SPLIT|REFERENCE|REJECT","assetIds":[],"reason":"","alternatives":[{"decision":"REUSE","reason":""}],"assumptions":[],"partitions":[{"name":"","taskIds":[]}]}]}';
 const sourceInfo=sources=>sources.map(({body,...source})=>source);
 const requestSize=(instruction,data)=>instruction.length+28+JSON.stringify(data).length;
 
@@ -93,6 +96,69 @@ function mergeTaskGroups(tasks,groups){
   }
   if(seen.size!==all.size)throw error('跨批次任务合并未覆盖全部候选任务');
   return merged;
+}
+
+// Send only task boundary fields to reconciliation and clustering. All full
+// task objects stay in the store and are reattached by task ID on expansion.
+function taskSummary(t){
+  return {id:t.id,name:t.name,trigger:t.trigger,actor:t.actor,inputs:t.inputs,output:t.output,recurring:t.recurring};
+}
+function compareTask(a,b){
+  const str=t=>[t.recurring?'1':'0',t.name,t.trigger,t.actor,t.output].join(' ').normalize('NFKC').toLowerCase();
+  return str(a).localeCompare(str(b))||a.id.localeCompare(b.id);
+}
+function validateCoverage(groups,allowed,field){
+  const seen=new Set();
+  for(const group of list(groups,100)){
+    const keys=list(group[field],MAX_PLAN_TASKS);
+    if(!keys.length)throw error('分层归并中存在空分组');
+    for(const id of keys){
+      if(!allowed.has(id)||seen.has(id))throw error('分层归并发生遗漏、重复或未知引用，已停止规划');
+      seen.add(id);
+    }
+  }
+  if(seen.size!==allowed.size)throw error('分层归并未覆盖全部输入任务，已停止规划');
+}
+async function hierarchyBundles(tasks,call,save,report){
+  let units=tasks.map(t=>({id:t.id,name:t.name,summary:[t.trigger,t.actor,t.output].join('；'),recurring:t.recurring,taskIds:[t.id]}));
+  const initial=units.length;
+  let levels=0;
+  const instruction='分层归并工作任务的能力范围：这些是任务索引而不是要删除的任务。相同业务目的、协作角色和交付边界可归入同一个能力簇；不同权限、交付和触发的任务须保持独立。允许将多任务归为一个待全局审查的能力簇，但不能据此声称它们是同一个任务。不按书籍章节机械归组。必须完整、唯一覆盖本页的 unit id。仅输出 {"groups":[{"name":"能力簇名称","reason":"共同目的与边界","unitIds":["已有 unit id"]}]}。不允许凭空新增任务，也不得混合 recurring=true 与 false。';
+  while(units.length>HIERARCHY_PAGE_SIZE&&levels<MAX_HIERARCHY_LEVELS){
+    levels++;
+    const ordered=[...units].sort((a,b)=>
+      (String(a.recurring)+' '+a.name+' '+a.summary).localeCompare(String(b.recurring)+' '+b.name+' '+b.summary)||a.id.localeCompare(b.id));
+    const next=[];
+    const pages=[];
+    for(let i=0;i<ordered.length;i+=HIERARCHY_PAGE_SIZE)pages.push(ordered.slice(i,i+HIERARCHY_PAGE_SIZE));
+    for(let index=0;index<pages.length;index++){
+      const page=pages[index];
+      const data={level:levels,units:page.map(u=>({id:u.id,name:u.name,summary:u.summary.slice(0,380),recurring:u.recurring,taskCount:u.taskIds.length}))};
+      report({stage:'cluster',level:levels,completed:index,total:pages.length});
+      const fetched=await call(instruction,data,levels,index+1);
+      const groups=fetched?.__uncached??fetched;
+      validateCoverage(groups,new Set(page.map(u=>u.id)),'unitIds');
+      const byId=new Map(page.map(u=>[u.id,u]));
+      const converted=groups.map(g=>{
+        const members=g.unitIds.map(id=>byId.get(id));
+        if(new Set(members.map(x=>x.recurring)).size!==1)throw error('分层归并不允许混合知识参考与可执行任务');
+        const taskIds=members.flatMap(x=>x.taskIds);
+        const row={name:required(g.name,'能力簇名称',150),summary:required(g.reason,'能力簇理由',500),recurring:members[0].recurring,taskIds};
+        return {id:key('planning-bundle',row),...row};
+      });
+      if(fetched?.__uncached)await save(fetched.__key,groups);
+      next.push(...converted);
+      report({stage:'cluster',level:levels,completed:index+1,total:pages.length});
+    }
+    if(next.length>=units.length){
+      throw error('任务之间缺少足够的共同业务边界，分层归并未能缩减；已保存检查点，不会强行丢弃任务或生成虚假 Skill',413);
+    }
+    units=next;
+  }
+  if(units.length>HIERARCHY_PAGE_SIZE)throw error('分层归并达到最大层数仍未收敛，已保存检查点并停止生成不完整规划',413);
+  const expected=new Set(tasks.map(t=>t.id));
+  validateCoverage(units.map(u=>({taskIds:u.taskIds})),expected,'taskIds');
+  return {bundles:units,levels,initial};
 }
 
 // Blueprint design uses an auditable reference manifest when fully expanded
@@ -292,35 +358,86 @@ export function createArchitect(engine, run, catalog) {
         tasks.push(...batchTasks);
         report({stage:'discover',completed:index+1,total:batches.length});
       }
-      // Reconcile task boundaries across batches BEFORE planning Skill quantities.
-      // Every candidate must be assigned exactly once; models cannot silently omit it.
+      // Fragmented evidence can appear in two discovery requests. Identical
+      // task IDs denote byte-identical task payloads; collapse those duplicate
+      // references rather than failing an otherwise complete book analysis.
+      const distinct=new Map();
+      for(const item of tasks){
+        const prev=distinct.get(item.id);
+        if(prev&&JSON.stringify(prev)!==JSON.stringify(item))throw error('任务标识冲突，不能安全合并缓存结果');
+        distinct.set(item.id,item);
+      }
+      tasks=[...distinct.values()];
+      // Every discovery batch is cached before reconciliation starts. Large books
+      // are deduplicated in bounded pages rather than rejected at 50 candidates.
       if(tasks.length>1){
-        report({stage:'reconcile',completed:batchCount,total:batchCount});
-        if(tasks.length>50)throw error('完整分批已处理，但发现的候选任务过多，需分层归并；未保存不完整规划',413);
-        const simple=tasks.map(({id,name,trigger,actor,inputs,output,recurring})=>({id,name,trigger,actor,inputs,output,recurring}));
-        const instruction='合并不同批次的语义相同任务，不按章节或方法分 Skill。只合并真实目标、触发、输入、输出及权限边界一致的任务，其他保持独立。只返回 {"groups":[{"taskIds":["已有task id"]}]}，每个输入任务 ID 必须出现且恰好出现一次，不得新增、遗漏、重复。不要把 recurring=false 的知识类任务与可执行任务合并。';
-        if(requestSize(instruction,{tasks:simple})>PROMPT_LIMIT)throw error('完整分批已处理，但跨批次归并输入过大；未保存不完整规划',413);
-        const reconcileHash=hash(simple);
-        let groups=oldCheckpoint?.reconciled?.hash===reconcileHash?oldCheckpoint.reconciled.payload:null;
-        if(!groups){
-          const reconciliation=await ask(input,instruction,{tasks:simple},'reconcile');
-          groups=reconciliation.groups;
-          // Validate fully BEFORE caching a reconciliation that may be resumed.
-          mergeTaskGroups(tasks,groups);
-          await saveStage('reconciled',reconcileHash,groups);
+        report({stage:'reconcile',completed:0,total:tasks.length});
+        const RECONCILE_INSTRUCTION='合并不同批次的语义相同任务，不按章节或方法分 Skill。只合并真实目标、触发、输入、输出及权限边界一致的任务，其他保持独立。只返回 {"groups":[{"taskIds":["已有task id"]}]}，每个输入任务 ID 必须出现且恰好出现一次，不得新增、遗漏、重复。不要把 recurring=false 的知识类任务与可执行任务合并。';
+        const pages=tasks.length<=50&&requestSize(RECONCILE_INSTRUCTION,{tasks:tasks.map(taskSummary)})<=PROMPT_LIMIT
+          ? [tasks] : [...tasks].sort(compareTask).reduce((pages,t,i)=>{
+            if(i%HIERARCHY_PAGE_SIZE===0)pages.push([]);
+            pages[pages.length-1].push(t);
+            return pages;
+          },[]);
+        const deduplicated=[];
+        for(let index=0;index<pages.length;index++){
+          const page=pages[index];
+          const simple=page.map(taskSummary);
+          const pageHash=hash({version:3,phase:'reconcile',input:simple});
+          const previous=pages.length===1?oldCheckpoint?.reconciled
+            :oldCheckpoint?.reconcilePages?.[pageHash];
+          let groups=previous?.hash===hash(simple)?previous.payload:null;
+          if(!groups){
+            const result=await ask(input,RECONCILE_INSTRUCTION,{tasks:simple},'reconcile');
+            groups=result.groups;
+            mergeTaskGroups(page,groups); // Fail closed before writing a checkpoint.
+            if(pages.length===1)await saveStage('reconciled',hash(simple),groups);
+            else await engine.transact(db=>{
+              const a=architecture(db),all=a.planningCheckpoints??={};
+              const item=all[checkpointId]??={id:checkpointId,sourceIds,provider:input.provider,model:input.model,batches:{},createdAt:timestamp()};
+              item.reconcilePages??={};
+              item.reconcilePages[pageHash]={hash:hash(simple),payload:groups};
+              item.updatedAt=timestamp();
+            });
+          }
+          deduplicated.push(...mergeTaskGroups(page,groups));
+          report({stage:'reconcile',completed:index+1,total:pages.length});
         }
-        tasks=mergeTaskGroups(tasks,groups);
+        tasks=deduplicated;
       }
     }
     if(!tasks.length)throw error('任务发现结果为空；原始资料已完整处理但尚不能建立能力架构');
-    if(tasks.length>50)throw error('候选任务超过单次能力规划上限；未保存不完整规划',413);
+    if(tasks.length>MAX_PLAN_TASKS)throw error('候选任务超过安全上限，请按任务范围分批规划；已保存发现检查点，未生成不完整规划',413);
+
+    // Hierarchical bundles are a PLANNING INDEX, not merged or deleted tasks.
+    // Task records, evidence and method references are kept intact, and the
+    // final capability decision is expanded back to exact task identifiers.
+    let bundles=null, hierarchyLevels=0;
+    if(tasks.length>50||requestSize(REVIEW_INSTRUCTION,{tasks:tasks.map(taskSummary),assets:[]})>PROMPT_LIMIT){
+      const result=await hierarchyBundles(tasks,async(instruction,data,level,page)=>{
+        const pageKey=hash({version:1,level,data});
+        const cached=oldCheckpoint?.hierarchyPages?.[pageKey];
+        if(cached)return cached;
+        const response=await ask(input,instruction,data,'cluster');
+        // hierarchyBundles validates exact coverage; never cache unchecked data.
+        return {__uncached:response.groups,__key:pageKey};
+      },async(key,groups)=>{
+        await engine.transact(db=>{
+          const a=architecture(db),all=a.planningCheckpoints??={};
+          const item=all[checkpointId]??={id:checkpointId,sourceIds,provider:input.provider,model:input.model,batches:{},createdAt:timestamp()};
+          item.hierarchyPages??={};item.hierarchyPages[key]=groups;item.updatedAt=timestamp();
+        });
+      },report);
+      bundles=result.bundles;hierarchyLevels=result.levels;
+    }
     const relevant=new Set(assets.flatMap(asset=>tasks.some(t=>overlap(t.name+' '+t.trigger+' '+t.output,asset.id+' '+asset.description)>=0.25)?[asset.id]:[]));
     const assetList=assets.map(a=>({id:a.id,description:a.description.slice(0,relevant.has(a.id)?700:200),managed:a.managed}));
     let candidateAssets=assetList;
     if(requestSize(REVIEW_INSTRUCTION,{tasks,assets:assetList})>PROMPT_LIMIT){
       // Scan every inventory entry in bounded pages, rather than silently
       // dropping assets and producing duplicate CREATE decisions.
-      const summary=tasks.map(t=>({id:t.id,name:t.name.slice(0,200),trigger:t.trigger.slice(0,260),output:t.output.slice(0,260)}));
+      const summary=bundles?bundles.map(b=>({id:b.id,name:b.name.slice(0,200),trigger:b.summary.slice(0,260),output:'覆盖 '+b.taskIds.length+' 项原始任务'})):
+        tasks.map(t=>({id:t.id,name:t.name.slice(0,200),trigger:t.trigger.slice(0,260),output:t.output.slice(0,260)}));
       const instruction='检查现有 Skill 是否可能覆盖、增强或与候选任务重复。返回 {"candidateIds":["已提供的Skill id"]}；不确定时应保守保留候选；只能引用本页资产的 id，不要新增或修改资产。';
       const pages=[];
       let current=[];
@@ -359,17 +476,28 @@ export function createArchitect(engine, run, catalog) {
       }
       candidateAssets=assetList.filter(a=>selected.has(a.id));
     }
-    const portfolioData={tasks,assets:candidateAssets};
-    // The complete task records remain in state; the portfolio stage does not
-    // need to resend long citation lists already verified during discovery.
-    if(requestSize(REVIEW_INSTRUCTION,portfolioData)>PROMPT_LIMIT){
-      portfolioData.tasks=tasks.map(({id,name,trigger,actor,inputs,output,recurring})=>({id,name,trigger,actor,inputs,output,recurring}));
+    const hierarchical=Boolean(bundles);
+    const portfolioInstruction=hierarchical?
+      REVIEW_INSTRUCTION.replace('taskIds','bundleIds')+' 这是分层任务索引，不是已经决定好的 Skill。每个 bundle 必须且只能归属于一个最终 capability，且完整覆盖所有 bundleIds。返回 capability 的 bundleIds 而不是 taskIds；系统会恢复其下每一项原始任务。独立任务不因被归于簇而丢失。':REVIEW_INSTRUCTION;
+    const portfolioData=hierarchical?{bundles:bundles.map(b=>({id:b.id,name:b.name,summary:b.summary,recurring:b.recurring,taskCount:b.taskIds.length})),assets:candidateAssets}
+      :{tasks,assets:candidateAssets};
+    if(!hierarchical&&requestSize(portfolioInstruction,portfolioData)>PROMPT_LIMIT){
+      portfolioData.tasks=tasks.map(taskSummary);
     }
-    if(requestSize(REVIEW_INSTRUCTION,portfolioData)>PROMPT_LIMIT){
+    if(requestSize(portfolioInstruction,portfolioData)>PROMPT_LIMIT){
       throw error('能力归并阶段输入过大，已保留完整任务证据，未保存不完整方案',413);
     }
     report({stage:'portfolio',completed:batchCount,total:batchCount});
-    const review=await ask(input,REVIEW_INSTRUCTION,portfolioData,'portfolio');
+    const review=await ask(input,portfolioInstruction,portfolioData,'portfolio');
+    if(hierarchical){
+      const known=new Set(bundles.map(b=>b.id));
+      const allGroups=list(review.capabilities,50);
+      validateCoverage(allGroups,known,'bundleIds');
+      const mapping=new Map(bundles.map(b=>[b.id,b.taskIds]));
+      for(const c of allGroups){
+        c.taskIds=c.bundleIds.flatMap(id=>mapping.get(id));
+      }
+    }
     const aIds=new Set(assets.map(a=>a.id)), tIds=new Set(tasks.map(t=>t.id));
     const capabilities=list(review.capabilities,50).map(c=>{
       const selected=ids(c.taskIds,tIds);
@@ -400,7 +528,10 @@ export function createArchitect(engine, run, catalog) {
         reason:guard||required(c.reason,'决策理由'),assumptions:list(c.assumptions,20).map(v=>required(v,'待验证假设'))};
       return {id:key('capability',row),...row};
     });
-    if(!capabilities.length||new Set(capabilities.flatMap(c=>c.taskIds)).size!==tIds.size)throw error('能力架构未覆盖已发现任务');
+    const assignment=new Map();
+    for(const c of capabilities)for(const id of c.taskIds)assignment.set(id,(assignment.get(id)||0)+1);
+    if(!capabilities.length||tIds.size!==assignment.size||[...assignment.values()].some(n=>n!==1))
+      throw error('最终能力架构任务遗漏或重复，未保存不完整规划');
     return engine.transact(db=>{
       const a=architecture(db);
       tasks.forEach(t=>{a.tasks[t.id]??=t;});
@@ -408,7 +539,7 @@ export function createArchitect(engine, run, catalog) {
       const id=key('plan',sourceIds,capabilities.map(c=>c.id),input.requestId||timestamp());
       if(checkpointId&&a.planningCheckpoints)delete a.planningCheckpoints[checkpointId];
       report({stage:'complete',completed:batchCount,total:batchCount});
-      return a.plans[id]={id,sourceIds,taskIds:tasks.map(t=>t.id),capabilityIds:capabilities.map(c=>c.id),inventory:assets,planning:{mode:batchCount>1?'batched':'single',batchCount,taskCount:tasks.length,sourceCount:sources.length,evidenceCount:evidence.length,methodCount:methods.length,inventoryScanned:assetList.length,inventoryConsidered:candidateAssets.length,complete:sources.every(s=>!s.truncated),truncatedSourceIds:sources.filter(s=>s.truncated).map(s=>s.id)},status:'proposed',revision:1,createdAt:timestamp()};
+      return a.plans[id]={id,sourceIds,taskIds:tasks.map(t=>t.id),capabilityIds:capabilities.map(c=>c.id),inventory:assets,planning:{mode:hierarchical?'hierarchical':batchCount>1?'batched':'single',batchCount,taskCount:tasks.length,bundleCount:bundles?.length||null,hierarchyLevels,sourceCount:sources.length,evidenceCount:evidence.length,methodCount:methods.length,inventoryScanned:assetList.length,inventoryConsidered:candidateAssets.length,complete:sources.every(s=>!s.truncated),truncatedSourceIds:sources.filter(s=>s.truncated).map(s=>s.id)},status:'proposed',revision:1,createdAt:timestamp()};
     });
   }
 

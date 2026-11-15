@@ -1,15 +1,23 @@
-# DSH Skill Factory v0.3.8（模型超时恢复候选版）
+# DSH Skill Factory v0.3.9（分层任务归并候选版）
 
-> 基于 v0.3.6 通用 Skill Architect 工作流迭代；**仍需在用户 Mac 的真实 DSH 中验证**。本次修复大资料超过单次模型输入上限的情况，不以裁剪整本书代替完整分析。
+> 保留通用 Skill Architect 的业务模型，不对 OKR 书籍做特例；**仍需在用户 Mac 的真实 DSH 中验证**。不裁剪整本书，也不将不同任务为了凑 Skill 数量而合并。
 
-## v0.3.8 更新
+## v0.3.9 更新：分层任务归并
+
+- 修复全书分批完成后候选任务超过 50 个即停止规划的问题，改为**有界去重分页 → 任务能力簇分层归并 → 全局 Skill 架构决策**。
+- **任务 ≠ Skill**：原始任务、证据 ID、方法 ID 保留并可追溯；中间能力簇仅用于模型规划，最终展开回完整任务集合，不能丢失任何任务或反复归属。
+- 分层处理逐页保存经核验的检查点；模型中断、Host 重启后按输入/模型/处理版本复用已完成的分析和归并分页。
+- 安全门禁：禁止缺失、重复或未知任务引用；禁止把纯知识参考和可执行任务混为同一簇；不能合理收敛时阻止不完整规划，而非强行生成 Skill。
+- 对同一长证据跨分批出现的**完全一致**任务去重，避免错误地把重复记录当成两个任务。
+- 新增 90 任务分层规划及 78 任务缺失/恢复测试，当前 **42/42 离线自动化测试通过**，未完成真实模型端到端验收。
+
+## v0.3.8 更新：模型超时恢复
 
 - 将能力架构阶段原有固定 120 秒模型超时调整为受控的 240 秒；其他模型调用仍使用原来的默认时限。
 - 各规划阶段使用更合理的输出 token 预算，不再固定要求 12,000 tokens。
 - `MODEL_TIMEOUT` 最多自动重试一次；结构错误、证据错误等非暂时失败不会重试。重试状态在工作台可见。
 - 单次任务发现、跨批次任务归并和已有 Skill 资产扫描均可在中断后复用已经验证的检查点。
 - 兼容 v0.3.7 已保存的分批规划检查点；不覆盖原始书籍、分析结果、评测历史或 Skill。
-- 离线模拟测试不等于在用户 Mac 的真实 DSH 中完成验收。
 
 ## v0.3.7 更新
 
@@ -50,7 +58,7 @@ npm run check
 npm pack
 # 完全退出 DSH；按需先备份 ~/.dsh/skill-factory
 # dsh plugin --profile desktop remove dsh-personal-skill-factory
-# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.3.5.tgz
+# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.3.9.tgz
 # dsh plugin --profile desktop list --depth 0
 ```
 

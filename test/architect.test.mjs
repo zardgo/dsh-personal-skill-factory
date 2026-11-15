@@ -391,3 +391,130 @@ test('single-stage discovery survives a portfolio timeout across host recreation
  assert.equal(portfolio,3);
  assert.equal(Object.keys((await f.engine.state()).architecture.planningCheckpoints||{}).length,0);
 });
+
+
+test('hierarchical planning covers 90 distinct book tasks without forcing them into 50 fake tasks',async t=>{
+ const f=await make(t);
+ const source=await f.architect.ingest({kind:'knowledge',title:'Long handbook',text:'Complete operational evidence catalog'});
+ await f.engine.transact(db=>{
+   const a=architecture(db);
+   for(let i=0;i<90;i++)a.evidence['hier-'+i]={id:'hier-'+i,sourceId:source.id,quote:('Verified operation '+i+';').repeat(120),location:'chapter '+i,verified:true};
+ });
+ const observed={discovery:0,reconcile:0,cluster:0,portfolio:0};
+ const runner=async({prompt})=>{
+   assert.ok(prompt.length<=67000,'no model request may exceed 67,000 chars');
+   const data=extract(prompt);
+   if(prompt.includes('连续分批')){
+     observed.discovery++;
+     return {text:JSON.stringify({tasks:[...new Set(data.evidence.map(e=>e.id))].filter(id=>id.startsWith('hier-')).map(id=>task('Evaluate operation '+id,[id]))})};
+   }
+   if(prompt.includes('合并不同批次')){
+     observed.reconcile++;
+     return {text:JSON.stringify({groups:data.tasks.map(x=>({taskIds:[x.id]}))})};
+   }
+   if(prompt.includes('分层归并工作任务')){
+     observed.cluster++;
+     const result=[];
+     for(let i=0;i<data.units.length;i+=6){
+       result.push({name:'Coherent operational audit '+Math.floor(i/6),reason:'Common audit workflow',unitIds:data.units.slice(i,i+6).map(u=>u.id)});
+     }
+     return {text:JSON.stringify({groups:result})};
+   }
+   if(prompt.includes('将任务聚类')){
+     observed.portfolio++;
+     assert.equal(data.tasks,undefined,'hierarchical portfolio must only send bundles');
+     assert.ok(data.bundles.length<=24);
+     return {text:JSON.stringify({capabilities:[{name:'Operational audit',bundleIds:data.bundles.map(x=>x.id),decision:'CREATE',assetIds:[],reason:'Same operational audit intent',alternatives:[{decision:'REFERENCE',reason:'Keep for reference'}],assumptions:[],partitions:[]}]})};
+   }
+   throw Error('Unexpected model request');
+ };
+ const a=createArchitect(f.engine,runner,async()=>({complete:true,skills:[]}));
+ const plan=await a.plan({...consent,sourceIds:[source.id]});
+ assert.equal(plan.planning.mode,'hierarchical');
+ assert.equal(plan.planning.taskCount,90);
+ assert.ok(plan.planning.bundleCount<=24);
+ assert.ok(plan.planning.hierarchyLevels>=1);
+ assert.ok(observed.discovery>1&&observed.reconcile>1&&observed.cluster>1&&observed.portfolio===1);
+ const snapshot=await a.snapshot();
+ assert.equal(plan.taskIds.length,90);
+ assert.equal(new Set(plan.taskIds).size,90);
+ const merged=snapshot.capabilities[plan.capabilityIds[0]];
+ assert.equal(merged.taskIds.length,90);
+ assert.equal(merged.evidenceIds.length,90);
+ assert.ok(plan.taskIds.every(id=>snapshot.tasks[id]?.evidenceIds.length===1));
+ assert.equal(Object.keys((await f.engine.state()).architecture.planningCheckpoints||{}).length,0);
+});
+
+test('hierarchy rejects missing member and resumes completed grouping pages without rerunning discoveries',async t=>{
+ const f=await make(t);
+ const source=await f.architect.ingest({kind:'knowledge',title:'Resumable hierarchy',text:'Evidence-based operational catalog'});
+ await f.engine.transact(db=>{
+   const a=architecture(db);
+   for(let i=0;i<78;i++)a.evidence['case-'+i]={id:'case-'+i,sourceId:source.id,quote:('Incident record '+i+';').repeat(130),location:'case '+i,verified:true};
+ });
+ const seen={discovery:0,reconcile:0,cluster:0,portfolio:0};
+ let fail=true;
+ const runner=async({prompt})=>{
+   const data=extract(prompt);
+   if(prompt.includes('连续分批')){
+     seen.discovery++;
+     return {text:JSON.stringify({tasks:[...new Set(data.evidence.map(e=>e.id))].filter(id=>id.startsWith('case-')).map(id=>task('Inspect '+id,[id]))})};
+   }
+   if(prompt.includes('合并不同批次')){
+     seen.reconcile++;
+     return {text:JSON.stringify({groups:data.tasks.map(x=>({taskIds:[x.id]}))})};
+   }
+   if(prompt.includes('分层归并工作任务')){
+     seen.cluster++;
+     const groups=[];
+     for(let i=0;i<data.units.length;i+=5)groups.push({name:'Inspection',reason:'Related workflow',unitIds:data.units.slice(i,i+5).map(x=>x.id)});
+     if(fail&&seen.cluster===2)groups[groups.length-1].unitIds.pop();
+     return {text:JSON.stringify({groups})};
+   }
+   if(prompt.includes('将任务聚类')){
+     seen.portfolio++;
+     return {text:JSON.stringify({capabilities:[{name:'Case inspection',bundleIds:data.bundles.map(x=>x.id),decision:'CREATE',assetIds:[],reason:'One workflow',alternatives:[{decision:'REFERENCE',reason:'Alternative'}],assumptions:[],partitions:[]}]})};
+   }
+   throw Error('Unexpected model stage');
+ };
+ const architect=createArchitect(f.engine,runner,async()=>({complete:true,skills:[]}));
+ const args={...consent,sourceIds:[source.id]};
+ await assert.rejects(architect.plan(args),/分层归并.*遗漏|分层归并.*覆盖/);
+ assert.equal(Object.keys((await architect.snapshot()).plans).length,0);
+ const counts={...seen};fail=false;
+ const plan=await architect.plan(args);
+ assert.equal(seen.discovery,counts.discovery,'discovery checkpoint survives rejected group');
+ assert.equal(seen.reconcile,counts.reconcile,'reconcile checkpoint survives rejected group');
+ assert.equal(seen.cluster-counts.cluster,Math.ceil(78/24)-1,'the first valid cluster page must be reused');
+ assert.equal(plan.taskIds.length,78);
+ assert.equal(plan.planning.mode,'hierarchical');
+});
+
+
+test('repeated fragments of one long evidence cannot inflate the number of discovered tasks',async t=>{
+ const f=await make(t);
+ const source=await f.architect.ingest({kind:'knowledge',title:'Single huge quote',text:'One documented process.'});
+ await f.engine.transact(db=>{
+   architecture(db).evidence['same-evidence']={id:'same-evidence',sourceId:source.id,quote:'Long documented incident '.repeat(9000),location:'source',verified:true};
+ });
+ let discoveryCalls=0;
+ const runner=async({prompt})=>{
+   const data=extract(prompt);
+   if(prompt.includes('连续分批')){
+     discoveryCalls++;
+     return {text:JSON.stringify({tasks:data.evidence.some(x=>x.id==='same-evidence')
+       ?[task('Inspect identical record',['same-evidence'])]:[]})};
+   }
+   if(prompt.includes('将任务聚类')){
+     assert.equal(data.tasks.length,1);
+     return {text:JSON.stringify({capabilities:[{name:'Record inspection',taskIds:data.tasks.map(x=>x.id),decision:'CREATE',assetIds:[],reason:'One recurring workflow',alternatives:[{decision:'REFERENCE',reason:'Alternative'}],assumptions:[],partitions:[]}]})};
+   }
+   throw Error('Unexpected planning phase: '+prompt.slice(0,85));
+ };
+ const a=createArchitect(f.engine,runner,async()=>({complete:true,skills:[]}));
+ const plan=await a.plan({...consent,sourceIds:[source.id]});
+ assert.ok(discoveryCalls>5);
+ assert.equal(plan.taskIds.length,1,'identical content across evidence fragments is one task');
+ assert.equal(plan.capabilityIds.length,1);
+ assert.equal(Object.keys((await a.snapshot()).plans).length,1);
+});
