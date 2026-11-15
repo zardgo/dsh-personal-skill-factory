@@ -58,3 +58,18 @@ test('SDK exceptions and absent finish cannot pass; token truncation can be repa
   assert.equal(repaired.status,'ready');
   assert.equal(repaired.attempts[0].finish,'max-tokens');
 });
+
+test('stage-specific timeout aborts the DSH model request and preserves timeout evidence',async()=>{
+  let aborted=false;
+  const context={llm:{listProviders:async()=>[{id:'fixture'}],async *stream({signal}){
+    try{
+      await new Promise(resolve=>{
+        if(signal.aborted)return resolve();
+        signal.addEventListener('abort',()=>{aborted=true;resolve();},{once:true});
+      });
+    }finally{aborted=aborted||signal.aborted;}
+  }}};
+  await assert.rejects(oneShot(context,{...opts,...prompt,timeoutMs:35,maxTokens:500}),e=>e.code==='MODEL_TIMEOUT'&&e.status===504);
+  assert.equal(aborted,true);
+  await assert.rejects(oneShot(context,{...opts,...prompt,timeoutMs:360001}),/超时配置/);
+});

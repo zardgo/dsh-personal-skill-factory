@@ -29,7 +29,7 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
   async function job(operation, args, slug) {
     if(!sent||!choice)throw Error('请先选择模型并确认发送');
     const task=await call('/job-start',{...JSON.parse(choice),...args,operation,slug,allowModelSend:true,cwd:scope.trim()||undefined});
-    return (await waitForJob(task.id,operation==='architect-plan'?1800000:540000,
+    return (await waitForJob(task.id,operation==='architect-plan'?5400000:540000,
       p=>setPlanProgress(previous=>JSON.stringify(previous)===JSON.stringify(p)?previous:p))).result;
   }
   const plan=data?.plans?.[planId];
@@ -127,7 +127,8 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
       b.generation?.status==='needs-review'?h('pre',{className:'sf-code'},JSON.stringify(b.generation.issues,null,2)):null)),
     plan?.status==='pending'?h('div',null,h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:accepted,onChange:e=>setAccepted(e.target.checked)}),'已审核能力决策、蓝图和评测预期'),
       btn('批准当前架构与蓝图',()=>action(()=>call('/architecture/approve',{planId,revision:plan.revision,approved:true})),'primary',busy||!accepted)):null,
-    busy?h('p',{role:'status'},planProgress?.stage==='discover'
+    busy?h('p',{role:'status'},planProgress?.stage==='retry'?`模型本轮请求超时，正在进行最后一次自动重试（阶段：${planProgress.phase}）。已完成的批次不会丢失。`
+      :planProgress?.stage==='discover'
       ?`正在分批理解资料：第 ${planProgress.completed}/${planProgress.total} 批。已完成批次会保存，失败后可继续。`
       :planProgress?.stage==='reconcile'?'正在跨批次归并任务，避免按章节生成重复 Skill。'
       :planProgress?.stage==='portfolio'?'正在全局审查能力架构与已有 Skill 资产。'

@@ -192,14 +192,26 @@ export function createArchitect(engine, run, catalog) {
       return a.sources[id];
     });
   }
-  async function ask(input, instruction, data) {
+  async function ask(input, instruction, data, phase='planning') {
     if(input.allowModelSend!==true)throw error('请先确认向配置模型发送所选资料与技能摘要',403);
     if(!run)throw error('模型服务不可用',503);
     const prompt=instruction+'\n<untrusted-input>\n'+JSON.stringify(data)+'\n</untrusted-input>';
     if(prompt.length>PROMPT_LIMIT)throw error('规划阶段的内部请求超限；资料不会被截断或跳过，请检查分批结果',413);
     const {onProgress,...modelInput}=input;
-    const response=await run({...modelInput,system,prompt,maxTokens:12000});
-    return parseJson(response.text);
+    // Separate the request deadline from the client polling interval. 120 s was
+    // insufficient for large real DSH planning calls. Keep retry bounded to one
+    // extra attempt and NEVER retry schema/invalid-input failures.
+    const maxTokens=phase==='inventory'?1600:phase==='reconcile'?4000:phase==='discovery'?5200:6000;
+    for(let attempt=1;attempt<=2;attempt++){
+      try{
+        const response=await run({...modelInput,system,prompt,maxTokens,timeoutMs:240_000});
+        return parseJson(response.text);
+      }catch(e){
+        if(e?.code!=='MODEL_TIMEOUT'||attempt===2)throw e;
+        onProgress?.({stage:'retry',phase,attempt:2,limit:2,code:'MODEL_TIMEOUT'});
+        await new Promise(resolve=>setTimeout(resolve,700));
+      }
+    }
   }
   async function plan(input) {
     const db=await engine.state(), a=architecture(db);
@@ -215,10 +227,33 @@ export function createArchitect(engine, run, catalog) {
     let tasks=[];
     let batchCount=1;
     let checkpointId=null;
+    let oldCheckpoint=null;
+    async function saveStage(name,inputHash,payload){
+      await engine.transact(db=>{
+        const a=architecture(db);
+        const all=a.planningCheckpoints??={};
+        const item=all[checkpointId]??={id:checkpointId,sourceIds,provider:input.provider,model:input.model,batches:{},createdAt:timestamp()};
+        item[name]={hash:inputHash,payload};
+        item.updatedAt=timestamp();
+      });
+    }
     report({stage:'preparing',completed:0,total:1});
-    if(requestSize(DISCOVER_INSTRUCTION,originalData)<=PROMPT_LIMIT){
-      const discovery=await ask(input,DISCOVER_INSTRUCTION,originalData);
-      tasks=normalizeTasks(discovery,new Set(evidence.map(e=>e.id)),new Set(methods.map(m=>m.id)));
+    if(requestSize(DISCOVER_INSTRUCTION,originalData)<=DISCOVERY_BATCH_LIMIT){
+      checkpointId=key('architect-plan-single-checkpoint-v1',sourceIds,input.provider,input.model,originalData);
+      oldCheckpoint=a.planningCheckpoints?.[checkpointId];
+      if(oldCheckpoint?.discovery?.hash===hash(originalData)){
+        tasks=oldCheckpoint.discovery.payload;
+        if(!Array.isArray(tasks))throw error('规划单批缓存损坏');
+        for(const task of tasks){
+          if(task.id!==key('task',Object.fromEntries(['name','trigger','actor','inputs','output','recurring','uncertainties','evidenceIds','methodIds'].map(k=>[k,task[k]]))))throw error('规划单批缓存标识无效');
+          ids(task.evidenceIds,new Set(evidence.map(e=>e.id)));
+          ids(task.methodIds,new Set(methods.map(m=>m.id)));
+        }
+      }else{
+        const discovery=await ask(input,DISCOVER_INSTRUCTION,originalData,'discovery');
+        tasks=normalizeTasks(discovery,new Set(evidence.map(e=>e.id)),new Set(methods.map(m=>m.id)));
+        await saveStage('discovery',hash(originalData),tasks);
+      }
       report({stage:'discover',completed:1,total:1});
     }else{
       const batches=discoveryBatches(sources,methods,evidence);
@@ -226,7 +261,7 @@ export function createArchitect(engine, run, catalog) {
       // Completed chunks survive Host restart and are reused ONLY with matching
       // source content, model identity, batch input and planner schema.
       checkpointId=key('architect-plan-checkpoint-v2',sourceIds,input.provider,input.model,batches);
-      const oldCheckpoint=a.planningCheckpoints?.[checkpointId];
+      oldCheckpoint=a.planningCheckpoints?.[checkpointId];
       for(let index=0;index<batches.length;index++){
         const batch=batches[index];
         const batchHash=hash(batch);
@@ -238,7 +273,7 @@ export function createArchitect(engine, run, catalog) {
           if(!Array.isArray(batchTasks))throw error('规划批次缓存损坏，请检查数据状态');
         }else{
           const discovery=await ask(input,
-            DISCOVER_INSTRUCTION+' 这是完整资料的第 '+(index+1)+'/'+batches.length+' 个连续分批。仅依据本批材料提取任务，允许与其他批次重叠；不得宣称已看见其他批次，也不要按方法数量生成任务。只有 evidence 字段中出现的证据 ID 才可以直接引用。',batch);
+            DISCOVER_INSTRUCTION+' 这是完整资料的第 '+(index+1)+'/'+batches.length+' 个连续分批。仅依据本批材料提取任务，允许与其他批次重叠；不得宣称已看见其他批次，也不要按方法数量生成任务。只有 evidence 字段中出现的证据 ID 才可以直接引用。',batch,'discovery');
           batchTasks=normalizeTasks(discovery,new Set(batch.evidence.map(e=>e.id)),new Set(batch.methods.map(m=>m.id)));
           await engine.transact(db=>{
             const a=architecture(db);
@@ -265,8 +300,16 @@ export function createArchitect(engine, run, catalog) {
         const simple=tasks.map(({id,name,trigger,actor,inputs,output,recurring})=>({id,name,trigger,actor,inputs,output,recurring}));
         const instruction='合并不同批次的语义相同任务，不按章节或方法分 Skill。只合并真实目标、触发、输入、输出及权限边界一致的任务，其他保持独立。只返回 {"groups":[{"taskIds":["已有task id"]}]}，每个输入任务 ID 必须出现且恰好出现一次，不得新增、遗漏、重复。不要把 recurring=false 的知识类任务与可执行任务合并。';
         if(requestSize(instruction,{tasks:simple})>PROMPT_LIMIT)throw error('完整分批已处理，但跨批次归并输入过大；未保存不完整规划',413);
-        const reconciliation=await ask(input,instruction,{tasks:simple});
-        tasks=mergeTaskGroups(tasks,reconciliation.groups);
+        const reconcileHash=hash(simple);
+        let groups=oldCheckpoint?.reconciled?.hash===reconcileHash?oldCheckpoint.reconciled.payload:null;
+        if(!groups){
+          const reconciliation=await ask(input,instruction,{tasks:simple},'reconcile');
+          groups=reconciliation.groups;
+          // Validate fully BEFORE caching a reconciliation that may be resumed.
+          mergeTaskGroups(tasks,groups);
+          await saveStage('reconciled',reconcileHash,groups);
+        }
+        tasks=mergeTaskGroups(tasks,groups);
       }
     }
     if(!tasks.length)throw error('任务发现结果为空；原始资料已完整处理但尚不能建立能力架构');
@@ -292,8 +335,23 @@ export function createArchitect(engine, run, catalog) {
       const selected=new Set();
       for(let i=0;i<pages.length;i++){
         report({stage:'inventory',completed:i,total:pages.length});
-        const result=await ask(input,instruction,{tasks:summary,assets:pages[i]});
-        ids(result.candidateIds,new Set(pages[i].map(x=>x.id))).forEach(id=>selected.add(id));
+        const pageHash=hash({instruction,summary,assets:pages[i]});
+        const prior=oldCheckpoint?.inventoryPages?.[i];
+        let candidateIds;
+        if(prior?.hash===pageHash){
+          candidateIds=ids(prior.candidateIds,new Set(pages[i].map(x=>x.id)));
+        }else{
+          const result=await ask(input,instruction,{tasks:summary,assets:pages[i]},'inventory');
+          candidateIds=ids(result.candidateIds,new Set(pages[i].map(x=>x.id)));
+          await engine.transact(db=>{
+            const a=architecture(db),all=a.planningCheckpoints??={};
+            const item=all[checkpointId]??={id:checkpointId,sourceIds,provider:input.provider,model:input.model,batches:{},createdAt:timestamp()};
+            item.inventoryPages??={};
+            item.inventoryPages[i]={hash:pageHash,candidateIds};
+            item.updatedAt=timestamp();
+          });
+        }
+        candidateIds.forEach(id=>selected.add(id));
         report({stage:'inventory',completed:i+1,total:pages.length});
       }
       for(const item of assetList){
@@ -311,7 +369,7 @@ export function createArchitect(engine, run, catalog) {
       throw error('能力归并阶段输入过大，已保留完整任务证据，未保存不完整方案',413);
     }
     report({stage:'portfolio',completed:batchCount,total:batchCount});
-    const review=await ask(input,REVIEW_INSTRUCTION,portfolioData);
+    const review=await ask(input,REVIEW_INSTRUCTION,portfolioData,'portfolio');
     const aIds=new Set(assets.map(a=>a.id)), tIds=new Set(tasks.map(t=>t.id));
     const capabilities=list(review.capabilities,50).map(c=>{
       const selected=ids(c.taskIds,tIds);
@@ -411,7 +469,7 @@ export function createArchitect(engine, run, catalog) {
       const baseline=c.decision==='ENHANCE'?await managedBaseline(currentAssets.find(x=>x.id===c.assetIds[0])||{},db):null;
       const {packet,mode:evidenceContextMode}=blueprintPacket(BLUEPRINT_INSTRUCTION,unit,tasks,
         methodIds.map(id=>a.methods[id]),evidenceIds.map(id=>a.evidence[id]),baseline);
-      const proposal=await ask(input,BLUEPRINT_INSTRUCTION,packet);
+      const proposal=await ask(input,BLUEPRINT_INSTRUCTION,packet,'blueprint');
       const cases=list(proposal.cases,16).map((c,i)=>{
         if(!evalKinds.has(c.kind))throw error('测试类型无效');
         const expectations=list(c.expectations,10).map(x=>required(x,'预期行为',450));

@@ -335,3 +335,59 @@ test('planning resumes completed batches after a real model interruption, withou
  assert.deepEqual(plan.planning.truncatedSourceIds,[s.id]);
  assert.equal(Object.keys((await f.engine.state()).architecture.planningCheckpoints||{}).length,0);
 });
+
+test('planner retries an actual timeout once, reports retry and uses stage-specific token/deadline limits',async t=>{
+ const f=await make(t);
+ const s=await f.architect.ingest({kind:'knowledge',title:'Slow planner',text:'Audit recurring operational goals.'});
+ let discoveryCalls=0;
+ const progress=[];
+ const runner=async opts=>{
+   assert.equal(opts.timeoutMs,240000);
+   assert.ok(opts.maxTokens<12000);
+   const data=extract(opts.prompt);
+   if(opts.prompt.startsWith('发现可重复执行')){
+     discoveryCalls++;
+     if(discoveryCalls===1)throw Object.assign(Error('slow provider'),{code:'MODEL_TIMEOUT'});
+     return {text:JSON.stringify({tasks:[task('Review goals',data.evidence.map(x=>x.id))]})};
+   }
+   if(opts.prompt.startsWith('将任务聚类'))return {text:JSON.stringify({capabilities:[{name:'Goal review',taskIds:data.tasks.map(x=>x.id),decision:'CREATE',assetIds:[],reason:'Shared trigger and output',alternatives:[{decision:'REFERENCE',reason:'Background reference'}],assumptions:[],partitions:[]}]})};
+   throw Error('unexpected stage');
+ };
+ const a=createArchitect(f.engine,runner,async()=>({complete:true,skills:[]}));
+ const p=await a.plan({...consent,sourceIds:[s.id],onProgress:x=>progress.push(x)});
+ assert.equal(discoveryCalls,2);
+ assert.equal(p.capabilityIds.length,1);
+ assert.ok(progress.some(x=>x.stage==='retry'&&x.phase==='discovery'&&x.code==='MODEL_TIMEOUT'));
+ assert.equal(Object.keys((await f.engine.state()).architecture.planningCheckpoints||{}).length,0);
+});
+
+test('single-stage discovery survives a portfolio timeout across host recreation without another discovery call',async t=>{
+ const f=await make(t);
+ const s=await f.architect.ingest({kind:'knowledge',title:'Retryable plan',text:'Auditing recurring service goals with evidence.'});
+ let discovery=0,portfolio=0;
+ const runner=async opts=>{
+   const data=extract(opts.prompt);
+   if(opts.prompt.startsWith('发现可重复执行')){
+     discovery++;
+     return {text:JSON.stringify({tasks:[task('Review service goals',data.evidence.map(x=>x.id))]})};
+   }
+   if(opts.prompt.startsWith('将任务聚类')){
+     portfolio++;
+     if(portfolio<=2)throw Object.assign(Error('timeout'),{code:'MODEL_TIMEOUT'});
+     return {text:JSON.stringify({capabilities:[{name:'Service goal review',taskIds:data.tasks.map(x=>x.id),decision:'CREATE',assetIds:[],reason:'One output',alternatives:[{decision:'REFERENCE',reason:'Knowledge only'}],assumptions:[],partitions:[]}]})};
+   }
+   throw Error('unexpected stage');
+ };
+ const first=createArchitect(f.engine,runner,async()=>({complete:true,skills:[]}));
+ await assert.rejects(first.plan({...consent,sourceIds:[s.id]}),e=>e.code==='MODEL_TIMEOUT');
+ const state=await f.engine.state();
+ const checkpoint=Object.values(state.architecture.planningCheckpoints||{});
+ assert.equal(checkpoint.length,1);
+ assert.ok(checkpoint[0].discovery?.payload?.length);
+ const resumed=createArchitect(createEngine({root:f.engine.root,publishRoot:f.publishRoot}),runner,async()=>({complete:true,skills:[]}));
+ const p=await resumed.plan({...consent,sourceIds:[s.id]});
+ assert.equal(p.taskIds.length,1);
+ assert.equal(discovery,1,'cached discovery should be reused after Host process recreation');
+ assert.equal(portfolio,3);
+ assert.equal(Object.keys((await f.engine.state()).architecture.planningCheckpoints||{}).length,0);
+});

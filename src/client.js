@@ -3,7 +3,7 @@ var module = { exports: {} }; var exports = module.exports;
 'use strict';
 const React = require('react');
 const h = React.createElement;
-const VERSION='0.3.7';
+const VERSION='0.3.8';
 const DRAFT_FIELDS=['title','description','trigger','inputs','outputs','steps','rules','limits','testPlan'];
 const NS='personal.skillFactory';
 const ID='personal-skill-factory';
@@ -111,7 +111,7 @@ function App(){
   return result.data;
  }
   async function waitForJob(id,timeoutMs=540000,onProgress=null){
-   // One-shot DSH calls are bounded at 120s; polling has extra leeway for queueing.
+   // Long planner jobs may span many bounded model calls; do not confuse per-call timeout with job duration.
    for(const deadline=Date.now()+timeoutMs;Date.now()<deadline;){
     const job=await call('/job-status?id='+encodeURIComponent(id));
     if(onProgress&&job.progress)onProgress(job.progress);
