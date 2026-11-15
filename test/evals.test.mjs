@@ -5,6 +5,7 @@ import { validateCase,evaluateCase,runExecution,protocol,analyzeFailure,business
 import { assessTrigger } from '../src/eval-trigger.mjs';
 import { qualityGate } from '../src/eval-quality.mjs';
 import { hash } from '../src/architecture-store.mjs';
+import { RISK_TYPES, riskSummary } from '../src/risk-audit.mjs';
 
 const domains=JSON.parse(await readFile(new URL('../fixtures/cross-domain.json',import.meta.url)));
 const config={provider:'test-provider',model:'test-model',maxTokens:3000};
@@ -33,7 +34,8 @@ for(const {domain,test:item} of domains)test(domain+' uses symmetric facts and s
     if(calls.length===1)return modelResponse('{"status":"VALID","reasons":[]}');
     if(calls.length<4)return modelResponse('answer');
     const reverse=Boolean(parseInt(hash(item.id).at(-1),16)%2);
-    return modelResponse(JSON.stringify({criteria:[{id:item.expectations[0].id,A:reverse?pass:fail,B:reverse?fail:pass}]}));
+    return modelResponse(JSON.stringify({criteria:[{id:item.expectations[0].id,A:reverse?pass:fail,B:reverse?fail:pass}],
+      risk:RISK_TYPES.map(id=>({id,A:{verdict:'PASS',reason:'无风险',evidence:[]},B:{verdict:'PASS',reason:'无风险',evidence:[]}}))}));
   },{test:item,blueprint,config,version,skillBody:'Skill policy'});
   assert.equal(row.status,'PASS');
   assert.equal(calls[1].prompt,calls[2].prompt);
@@ -70,9 +72,29 @@ test('trigger checks real log shape, exact prompt, completion and pinned body',(
 test('gate requires immutable matching evidence, safety, trigger coverage and net gain',()=>{
  const p=domains[0].test,n={...p,id:'other',triggerExpected:false},suite={id:'approved',approvedAt:1,cases:[p,n]};
  const common={protocol,versionId:version.id,suiteId:suite.id,status:'PASS'};
- const execution={...common,caseId:p.id,judge:{criteria:[{assertion:p.expectations[0],skill:pass,baseline:fail}]}};
+ const execution={...common,caseId:p.id,judge:{criteria:[{assertion:p.expectations[0],skill:pass,baseline:fail}],
+    risks:RISK_TYPES.map(id=>({id,skill:{verdict:'PASS',reason:'未检出',evidence:[]},baseline:{verdict:'PASS',reason:'未检出',evidence:[]}}))}};
  const triggers=[p,n].map(x=>({...common,caseId:x.id,discovered:true,traceHash:'event-digest'}));
  assert.equal(qualityGate({suite,version,executions:[execution],triggers}).eligible,true);
  assert.equal(qualityGate({suite,version:{id:'new'},executions:[execution],triggers}).eligible,false);
  assert.equal(qualityGate({suite,version,executions:[execution],triggers:[]}).eligible,false);
+});
+test('independent risk failure blocks a case even when normal assertions all pass',async()=>{
+ const item=domains[0].test;
+ const reversed=Boolean(parseInt(hash(item.id).at(-1),16)%2);
+ const ok={verdict:'PASS',reason:'完成',evidence:['answer'],provenance:['material-verified'],causes:[]};
+ let calls=0;
+ const run=async request=>{
+  calls++;
+  if(calls===1)return modelResponse('{"status":"VALID","reasons":[]}');
+  if(calls<=3)return modelResponse('answer 却声称机构已经批准');
+  const risk=RISK_TYPES.map(id=>({id,A:{verdict:'PASS',reason:'无风险',evidence:[]},B:{verdict:'PASS',reason:'无风险',evidence:[]}}));
+  const harmful=reversed?'A':'B';
+  risk[1][harmful]={verdict:'FAIL',reason:'未经来源支持宣称有正式审批',evidence:['机构已经批准']};
+  return modelResponse(JSON.stringify({criteria:[{id:item.expectations[0].id,A:ok,B:ok}],risk}));
+ };
+ const result=await evaluateCase(run,{test:item,blueprint,config,version,skillBody:'fixed'});
+ assert.equal(result.status,'FAIL');
+ assert.ok(result.failures.some(x=>x.code==='CRITICAL_RISK'));
+ assert.equal(result.judge.criteria[0].skill.verdict,'PASS');
 });

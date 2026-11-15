@@ -1,3 +1,42 @@
+# DSH Skill Factory v0.3.5（质量与迭代候选版）
+
+> 基于用户提供的 v0.3.4 完整源码开发。保持 DSH 原生 Client + Host 插件架构；模型通过 DSH 已配置服务调用；不连接或更改其他业务工作台。
+
+## v0.3.5 主要更新
+
+- **独立关键风险质量门禁**：五种领域无关风险逐项检查；任务分数高不能掩盖风险失败，缺少风险判定也不能发布。
+- **候选优化实验**：已有真实 Evals → 生成候选 → 冻结用例小批试跑 → 人工确认应用 → 新 revision → 全套回归。支持质量或效率优化，不改写测试计划，不自动发布。
+- **右下角使用指南**：可最小化、关闭和重新打开，按页面提示操作、搜索常见问题；尽力保存显示状态。
+- **触发工作区恢复**：已保存工作区与用例可重新读取，实际会话 ID 仍需要人工核验。
+- **构建清理**：过滤 AppleDouble 文件，防止旧文件进入 npm 包。
+
+## 已验证与未验证
+
+原版 20/20 测试通过；升级后 31/31 本地自动化测试通过（包含模拟模型）。**没有在用户 Mac DSH 客户端运行本版真实模型或浏览器端到端测试**，不能称为已正式稳定。新的风险门禁将不含风险数据的旧执行记录标记为待复核，保留全部旧历史。
+
+详见 [RELEASE_NOTES_0.3.5.md](RELEASE_NOTES_0.3.5.md)。
+
+## 开发与安装
+
+```bash
+npm run check
+npm pack
+# 完全退出 DSH；按需先备份 ~/.dsh/skill-factory
+# dsh plugin --profile desktop remove dsh-personal-skill-factory
+# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.3.5.tgz
+# dsh plugin --profile desktop list --depth 0
+```
+
+**数据目录**：`~/.dsh/skill-factory/`，不随插件移除自动删除。发布到个人 Skill 目录仍需当前版本门禁及人工批准。不要将业务数据、会话日志、任何秘钥上传到 GitHub。
+
+## 借鉴与开源边界
+
+本版参考 Anthropic Skill Creator、Promptfoo、Braintrust AutoEvals、DSPy/GEPA 的设计模式，但没有复制其源码，也没有直接安装这些库；真实模型执行仍走 `ctx.llm`。无额外 runtime 依赖。
+
+---
+
+## 以下为原工程历史说明（留存供追溯）
+
 # DSH Skill Factory 0.2.8 候选版
 
 从 desktop profile 已安装的 0.2.6 包恢复可编辑源码。源码在 `src/`，构建复制到 `lib/` 并校验 Host、客户端与包版本一致。项目使用 Node 22.19 或更新版本。运行 `npm run check` 和 `npm pack`。

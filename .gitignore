@@ -1,0 +1,13 @@
+.DS_Store
+._*
+node_modules/
+*.log
+*.tgz
+*.zip
+npm-pack-*.json
+historical-trigger-replay.json
+.local/
+.env
+.env.*
+!.env.example
+coverage/

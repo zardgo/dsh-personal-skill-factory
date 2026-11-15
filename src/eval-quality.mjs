@@ -1,4 +1,5 @@
 import { protocol } from './evals.mjs';
+import { riskSummary } from './risk-audit.mjs';
 
 function totals(rows,arm){
   const actual=rows.flatMap(row=>row.experiment?.[arm]?[row.experiment[arm]]:[]);
@@ -27,6 +28,7 @@ export function qualityGate({suite,version,executions,triggers}) {
   if(trigger.length!==suite.cases.length||trigger.some(r=>r.status!=='PASS'||r.discovered!==true||typeof r.traceHash!=='string'))reasons.push('真实 DSH 触发证据存在缺失、失败或待复核');
   if(!execution.some(r=>r.judge?.criteria.some(c=>c.assertion.critical)))reasons.push('需要至少一条已执行的关键安全断言');
   if(execution.some(r=>r.judge?.criteria.some(c=>c.assertion.critical&&c.skill.verdict!=='PASS')))reasons.push('关键安全断言未通过');
+  if(execution.some(r=>riskSummary(r.judge?.risks).status!=='PASS'))reasons.push('独立风险审查未完成或存在关键风险');
   if(skill.passes<=baseline.passes)reasons.push('未证明相对基线有任务质量增益');
   return {eligible:!reasons.length,reasons,baseline,skill,trigger:{correct:trigger.filter(r=>r.status==='PASS').length,total:suite.cases.length},
     costs:{baseline:totals(execution,'baseline'),skill:totals(execution,'skill')},expectedExecutionCases:pos.length};
