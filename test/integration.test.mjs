@@ -153,3 +153,14 @@ test('publishing requires the current passing evaluation and rejects an unknown 
   await e.build(p.slug);
   await assert.rejects(e.publish({...publish,revision:revised.revision,replace:true}),/六个真实/);
 });
+
+test('portfolio optimization is reachable as a scoped background job without a document ID',async t=>{
+ const f=await fixture(t);
+ const call=transport(createHandler(f.engine));
+ const started=await call('/job-start',{operation:'architect-optimize',slug:'existing-plan',planId:'existing-plan',
+   revision:1,allowModelSend:true,provider:'test',model:'test'});
+ assert.equal(started.status,200);
+ const status=await finished(call,started.data.id);
+ assert.equal(status.status,'failed');
+ assert.match(status.error,/规划不存在/);
+});

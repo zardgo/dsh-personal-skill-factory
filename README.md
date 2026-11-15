@@ -1,6 +1,15 @@
-# DSH Skill Factory v0.3.9（分层任务归并候选版）
+# DSH Skill Factory v0.3.10（最终 Skill 组合优化候选版）
 
 > 保留通用 Skill Architect 的业务模型，不对 OKR 书籍做特例；**仍需在用户 Mac 的真实 DSH 中验证**。不裁剪整本书，也不将不同任务为了凑 Skill 数量而合并。
+
+## v0.3.10 更新：Skill Portfolio Optimizer
+
+- 在能力簇规划后，新增独立的「最终 Skill 组合优化」层。对 3 个及以上可新建/合并能力自动运行；旧规划可在工作台一键补做优化，**不需重新导入或重新解析书籍**。
+- AI 按共同业务目标与使用角色推荐最小充分的 Skill 组合，不硬编码某本书或一个固定 Skill 数量。不同角色、权限不确定及上下文未完整展示的能力禁止自动合并；既有 REUSE / REFERENCE / REJECT / ENHANCE / SPLIT 决策受到保护。
+- 自动验证每个候选能力恰好出现一次；优化失败会标记待复核并阻断默认按能力簇逐个生成。原始任务、来源证据和模型审查记录保持不变。
+- 页面默认只展示最终推荐卡片及理由；原始能力簇、任务与证据收纳进折叠的高级审核区。需要人工覆盖时才展开逐项修改。
+- 默认生成蓝图时由 **服务端** 根据已批准的优化分组展开，而不是仅通过页面视觉归并；生成、Evals 与发布审批仍单独保留。
+- 本地 51/51 项离线测试通过，未在用户 Mac 上进行真实 DSH UI 或《这就是OKR》整本模型验收。模型给出的角色/权限解释仍需人核实，不能视为真实权限清单。
 
 ## v0.3.9 更新：分层任务归并
 
@@ -58,7 +67,7 @@ npm run check
 npm pack
 # 完全退出 DSH；按需先备份 ~/.dsh/skill-factory
 # dsh plugin --profile desktop remove dsh-personal-skill-factory
-# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.3.9.tgz
+# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.3.10.tgz
 # dsh plugin --profile desktop list --depth 0
 ```
 

@@ -518,3 +518,97 @@ test('repeated fragments of one long evidence cannot inflate the number of disco
  assert.equal(plan.capabilityIds.length,1);
  assert.equal(Object.keys((await a.snapshot()).plans).length,1);
 });
+
+test('a saved v0.3.9 portfolio can be optimized without re-analysing the entire book',async t=>{
+ const f=await make(t);
+ const source=await f.architect.ingest({kind:'knowledge',title:'Goal handbook',text:'Goal evidence and guidance'});
+ const snapshot=await f.architect.snapshot();
+ const evidenceId=Object.values(snapshot.evidence).find(x=>x.sourceId===source.id).id;
+ await f.engine.transact(db=>{
+   const a=architecture(db);
+   const ids=[];
+   for(let i=0;i<8;i++){
+     a.tasks['task-'+i]={id:'task-'+i,...task('Quarterly goal '+i,[evidenceId])};
+     a.capabilities['cap-'+i]={id:'cap-'+i,name:'OKR method '+i,decision:'CREATE',taskIds:['task-'+i],
+       evidenceIds:[evidenceId],assetIds:[],reason:'Independent candidate',assumptions:[],partitions:[]};
+     ids.push('cap-'+i);
+   }
+   a.plans['legacy-proposal']={id:'legacy-proposal',status:'proposed',revision:1,sourceIds:[source.id],
+     taskIds:ids.map((_,i)=>'task-'+i),capabilityIds:ids,inventory:[]};
+ });
+ await assert.rejects(f.architect.prepare({...consent,planId:'legacy-proposal',revision:1}),/组合/);
+ f.queue.push(x=>{
+   const c=extract(x.prompt).eligibleCapabilities;
+   assert.equal(c.length,8);
+   return {groups:[{name:'OKR coach',capabilityIds:c.map(y=>y.id),sharedGoal:'Quarterly OKR guidance',
+     reason:'Same user intent, actor and permission boundary',roleBoundary:'Operator; analysis only',
+     exclusions:'No administrative publishing'}]};
+ });
+ const optimized=await f.architect.optimize({...consent,planId:'legacy-proposal',revision:1});
+ assert.equal(optimized.portfolio.skillCount,1);
+ assert.equal(optimized.revision,2);
+ assert.equal(optimized.taskIds.length,8);
+ const after=await f.architect.snapshot();
+ assert.equal(after.plans['legacy-proposal'].portfolio.groups.length,1);
+ assert.equal(optimized.capabilityIds.length,8,'pre-optimization audit trail is immutable');
+ f.queue.push(JSON.stringify(spec));
+ const pending=await f.architect.prepare({...consent,planId:'legacy-proposal',revision:2});
+ assert.equal(pending.blueprintIds.length,1);
+ const finalSnapshot=await f.architect.snapshot();
+ assert.equal(finalSnapshot.blueprints[pending.blueprintIds[0]].taskIds.length,8);
+ await assert.rejects(f.architect.optimize({...consent,planId:'legacy-proposal',revision:3}),/不可重新优化/);
+});
+
+test('invalid Skill portfolio optimization fails closed without corrupting saved capabilities',async t=>{
+ const f=await make(t);
+ const source=await f.architect.ingest({kind:'knowledge',title:'Mixed-role tasks',text:'Distinct role duties'});
+ const evidenceId=Object.values((await f.architect.snapshot()).evidence)[0].id;
+ await f.engine.transact(db=>{
+   const a=architecture(db);
+   for(const [id,actor] of [['first','Manager'],['second','Finance']]){
+     a.tasks[id]={id,...task('Review '+id,[evidenceId]),actor};
+     a.capabilities[id]={id,decision:'CREATE',name:'Review '+id,taskIds:[id],evidenceIds:[evidenceId],reason:'Separate role',assetIds:[]};
+   }
+   a.plans.p={id:'p',status:'proposed',revision:1,sourceIds:[source.id],taskIds:['first','second'],capabilityIds:['first','second'],inventory:[]};
+ });
+ f.queue.push(x=>({groups:[{name:'Unsafe',capabilityIds:extract(x.prompt).eligibleCapabilities.map(c=>c.id),
+   sharedGoal:'Shared',reason:'Ignoring permissions',roleBoundary:'Unknown',exclusions:'None'}]}));
+ await assert.rejects(f.architect.optimize({...consent,planId:'p',revision:1}),/跨角色/);
+ const after=(await f.architect.snapshot()).plans.p;
+ assert.equal(after.revision,1);assert.equal(after.portfolio,undefined);
+ assert.equal(after.capabilityIds.length,2);
+});
+
+test('new projects with multiple Skill candidates optimize automatically and require valid coverage',async t=>{
+ const f=await make(t);
+ const source=await f.architect.ingest({kind:'knowledge',title:'Goal work',text:'Team goals require review'});
+ const evidenceId=Object.values((await f.architect.snapshot()).evidence)[0].id;
+ f.queue.push(x=>({tasks:Array.from({length:4},(_,i)=>task('Goal action '+i,[evidenceId]))}));
+ f.queue.push(x=>({capabilities:extract(x.prompt).tasks.map(t=>({name:t.name,taskIds:[t.id],decision:'CREATE',
+   assetIds:[],reason:'Each task has a repeatable output',alternatives:[{decision:'REFERENCE',reason:'No new Skill'}],assumptions:[],partitions:[]}))}));
+ f.queue.push(x=>({groups:[{name:'Unified OKR coach',capabilityIds:extract(x.prompt).eligibleCapabilities.map(c=>c.id),
+   sharedGoal:'Review goals',reason:'Same actor and read-only task permissions',roleBoundary:'Operator',exclusions:'External writes'}]}));
+ const p=await f.architect.plan({...consent,sourceIds:[source.id]});
+ assert.equal(p.capabilityIds.length,4);assert.equal(p.portfolio.status,'ready');assert.equal(p.portfolio.skillCount,1);
+ f.queue.push(JSON.stringify(spec));
+ const prepared=await f.architect.prepare({...consent,planId:p.id,revision:1});
+ assert.equal(prepared.blueprintIds.length,1);
+});
+
+test('failed automatic portfolio optimization remains explicit and blocks default mass blueprint creation',async t=>{
+ const f=await make(t);
+ const source=await f.architect.ingest({kind:'knowledge',title:'Goal matrix',text:'A complete set of recurring goal tasks'});
+ const evidenceId=Object.values((await f.architect.snapshot()).evidence)[0].id;
+ f.queue.push(()=>({tasks:Array.from({length:3},(_,i)=>task('Goal review '+i,[evidenceId]))}));
+ f.queue.push(x=>({capabilities:extract(x.prompt).tasks.map(item=>({name:item.name,taskIds:[item.id],
+   decision:'CREATE',assetIds:[],reason:'Independent candidate',alternatives:[{decision:'REFERENCE',reason:'Alternative'}],assumptions:[],partitions:[]}))}));
+ // A truncated model reply is never a valid final recommendation.
+ f.queue.push(x=>({groups:[{name:'Partial only',capabilityIds:[extract(x.prompt).eligibleCapabilities[0].id],
+   sharedGoal:'Partial goal',reason:'Incomplete',roleBoundary:'Operator',exclusions:'Other tasks'}]}));
+ const p=await f.architect.plan({...consent,sourceIds:[source.id]});
+ assert.equal(p.portfolio.status,'needs-review');
+ assert.equal(p.capabilityIds.length,3);
+ await assert.rejects(f.architect.prepare({...consent,planId:p.id,revision:1}),/最终 Skill 组合尚未/);
+ const snapshot=await f.architect.snapshot();
+ assert.equal(Object.keys(snapshot.blueprints).length,0);
+});

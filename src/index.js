@@ -42,6 +42,7 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
   'eval-v2-execution':x=>evals.execution(x),
   'eval-v2-suite':x=>evals.suiteExecution(x),
   'architect-plan':x=>architect.plan(x),
+  'architect-optimize':x=>architect.optimize(x),
   'architect-prepare':x=>architect.prepare(x),
   'architect-generate':x=>generate(x),
   analyze:x=>engine.analyze(x),
@@ -109,7 +110,7 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
   '/job-start':['POST',startJob],'/job-status':['GET',jobStatus],'/eval-progress':['GET',x=>engine.evaluationProgress(x)],'/fork':['POST',()=>{throw fail('禁止绕过能力架构直接派生 Skill；历史候选不会删除',409)}],
   '/proposals':['GET',x=>engine.proposalRecords(x.slug,x.documentId)],
   '/models':['GET',()=>availableModels(modelContext)],
-  '/info':['GET',()=>({storageRoot:engine.root,publishRoot:engine.publishRoot,version:VERSION,capabilities:{backgroundSynthesis:true,backgroundEvals:true,jobPolling:true,derivedSkills:true,revisionGuard:true,optimizationTrials:true,independentRiskAudit:true,helpDock:true,unifiedArchitectureFlow:true},modelEvaluation:'dsh-native-when-configured',uploads:['pdf','epub','docx','txt','md'],environment:'DSH Host'})],
+  '/info':['GET',()=>({storageRoot:engine.root,publishRoot:engine.publishRoot,version:VERSION,capabilities:{backgroundSynthesis:true,backgroundEvals:true,jobPolling:true,derivedSkills:true,revisionGuard:true,optimizationTrials:true,independentRiskAudit:true,helpDock:true,unifiedArchitectureFlow:true,portfolioOptimizer:true},modelEvaluation:'dsh-native-when-configured',uploads:['pdf','epub','docx','txt','md'],environment:'DSH Host'})],
  };
  const handle=async function(path,req){
   const requestId=crypto.randomUUID();const route=routes[path];

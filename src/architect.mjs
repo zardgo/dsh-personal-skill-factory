@@ -1,6 +1,7 @@
 import { parseJson } from './model.mjs';
 import { architecture, decisions, error, hash, key, projectCatalog, timestamp } from './architecture-store.mjs';
 import { overlap, skillInventory, managedBaseline } from './skill-inventory.mjs';
+import { PORTFOLIO_AUTO_THRESHOLD, PORTFOLIO_INSTRUCTION, portfolioPacket, validatePortfolioProposal, editsForPortfolio } from './portfolio-optimizer.mjs';
 
 const list = (value,max=100) => {
   if(!Array.isArray(value)||value.length>max)throw error('列表格式无效或超出限制');
@@ -532,6 +533,21 @@ export function createArchitect(engine, run, catalog) {
     for(const c of capabilities)for(const id of c.taskIds)assignment.set(id,(assignment.get(id)||0)+1);
     if(!capabilities.length||tIds.size!==assignment.size||[...assignment.values()].some(n=>n!==1))
       throw error('最终能力架构任务遗漏或重复，未保存不完整规划');
+    let portfolio=null;
+    if(capabilities.filter(c=>c.decision==='CREATE'||c.decision==='MERGE').length>=PORTFOLIO_AUTO_THRESHOLD){
+      report({stage:'portfolio-optimize',completed:0,total:1});
+      try{
+        const raw=await ask(input,PORTFOLIO_INSTRUCTION,portfolioPacket(capabilities,Object.fromEntries(tasks.map(t=>[t.id,t]))),'portfolio-optimize');
+        portfolio=validatePortfolioProposal(raw,capabilities,Object.fromEntries(tasks.map(t=>[t.id,t])));
+        portfolio.model=input.model;
+      }catch(e){
+        // An invalid/timeout optimization is not a reason to discard validated
+        // planning, but it must NOT silently turn 30 capabilities into 30 Skills.
+        portfolio={version:1,status:'needs-review',error:String(e.message).slice(0,350),groups:[],
+          originalCapabilityCount:capabilities.length,generatedAt:timestamp()};
+      }
+      report({stage:'portfolio-optimize',completed:1,total:1});
+    }
     return engine.transact(db=>{
       const a=architecture(db);
       tasks.forEach(t=>{a.tasks[t.id]??=t;});
@@ -539,7 +555,34 @@ export function createArchitect(engine, run, catalog) {
       const id=key('plan',sourceIds,capabilities.map(c=>c.id),input.requestId||timestamp());
       if(checkpointId&&a.planningCheckpoints)delete a.planningCheckpoints[checkpointId];
       report({stage:'complete',completed:batchCount,total:batchCount});
-      return a.plans[id]={id,sourceIds,taskIds:tasks.map(t=>t.id),capabilityIds:capabilities.map(c=>c.id),inventory:assets,planning:{mode:hierarchical?'hierarchical':batchCount>1?'batched':'single',batchCount,taskCount:tasks.length,bundleCount:bundles?.length||null,hierarchyLevels,sourceCount:sources.length,evidenceCount:evidence.length,methodCount:methods.length,inventoryScanned:assetList.length,inventoryConsidered:candidateAssets.length,complete:sources.every(s=>!s.truncated),truncatedSourceIds:sources.filter(s=>s.truncated).map(s=>s.id)},status:'proposed',revision:1,createdAt:timestamp()};
+      return a.plans[id]={id,sourceIds,taskIds:tasks.map(t=>t.id),capabilityIds:capabilities.map(c=>c.id),inventory:assets,portfolio,planning:{mode:hierarchical?'hierarchical':batchCount>1?'batched':'single',batchCount,taskCount:tasks.length,bundleCount:bundles?.length||null,hierarchyLevels,sourceCount:sources.length,evidenceCount:evidence.length,methodCount:methods.length,inventoryScanned:assetList.length,inventoryConsidered:candidateAssets.length,complete:sources.every(s=>!s.truncated),truncatedSourceIds:sources.filter(s=>s.truncated).map(s=>s.id)},status:'proposed',revision:1,createdAt:timestamp()};
+    });
+  }
+
+  async function optimize(input) {
+    const db=await engine.state(),a=architecture(db),p=getPlan(a,input);
+    if(p.status!=='proposed')throw error('已进入蓝图审批的规划不可重新优化',409);
+    const capabilities=p.capabilityIds.map(id=>a.capabilities[id]);
+    const tasks=Object.fromEntries(p.taskIds.map(id=>[id,a.tasks[id]]));
+    const eligible=capabilities.filter(c=>c.decision==='CREATE'||c.decision==='MERGE');
+    if(eligible.some(c=>c.taskIds.some(id=>!tasks[id])))throw error('规划任务已变化，无法安全优化',409);
+    let result;
+    if(eligible.length<2){
+      result=validatePortfolioProposal({groups:eligible.map(c=>({name:c.name,capabilityIds:[c.id],
+        sharedGoal:c.reason||'既有独立任务目标',reason:'当前没有可进一步合并的候选能力',
+        roleBoundary:'保持原有角色与权限边界',exclusions:'不覆盖其他任务边界'}))},capabilities,tasks);
+    }else{
+      const raw=await ask(input,PORTFOLIO_INSTRUCTION,portfolioPacket(capabilities,tasks),'portfolio-optimize');
+      result=validatePortfolioProposal(raw,capabilities,tasks);
+    }
+    result.model=input.model||null;
+    return engine.transact(db=>{
+      const a=architecture(db),current=getPlan(a,input);
+      if(current.status!=='proposed')throw error('规划已进入蓝图审批',409);
+      current.portfolio=result;
+      current.revision++;
+      current.optimizedAt=timestamp();
+      return current;
     });
   }
 
@@ -551,6 +594,9 @@ export function createArchitect(engine, run, catalog) {
   }
   function architectureSelection(a,p,edits) {
     const capabilities=p.capabilityIds.map(id=>a.capabilities[id]);
+    if(!edits&&p.portfolio?.status==='ready')edits=editsForPortfolio(p.portfolio,capabilities);
+    if(!edits&&(p.portfolio?.status==='needs-review'||capabilities.filter(c=>c.decision==='CREATE'||c.decision==='MERGE').length>=PORTFOLIO_AUTO_THRESHOLD))
+      throw error('最终 Skill 组合尚未完成自动优化；请先优化，或明确提交人工架构决策',409);
     if(!edits)return capabilities;
     const used=new Set();
     const final=list(edits,60).map(edit=>{
@@ -633,5 +679,5 @@ export function createArchitect(engine, run, catalog) {
       return p;
     });
   }
-  return {snapshot,migrate,inventory,ingest,plan,prepare,approve};
+  return {snapshot,migrate,inventory,ingest,plan,optimize,prepare,approve};
 }
