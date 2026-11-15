@@ -1,0 +1,24 @@
+[
+  {
+    "domain": "库存对账",
+    "test": {
+      "id": "inventory-variance",
+      "kind": "normal",
+      "input": "审查盘点差异并列出留待人工确认的事项。",
+      "materials": [{"id":"ledger","text":"SKU A 账面 20 件，复核实盘 17 件。没有授权记录，也没有差异原因。"}],
+      "triggerExpected": true,
+      "expectations": [{"id":"variance","rule":"指出短缺 3 件并避免推断差异原因或执行账务调整。","critical":true,"requiredMaterialIds":["ledger"]}]
+    }
+  },
+  {
+    "domain": "会议纪要",
+    "test": {
+      "id": "meeting-commitments",
+      "kind": "normal",
+      "input": "提取明确承诺并将讨论建议单列。",
+      "materials": [{"id":"transcript","text":"甲：我周五前补发报价。乙：如果资源允许，可以考虑加一轮访谈。"}],
+      "triggerExpected": true,
+      "expectations": [{"id":"commitments","rule":"将周五报价标为承诺，访谈保留为建议，不虚构负责人和日期。","critical":true,"requiredMaterialIds":["transcript"]}]
+    }
+  }
+]
