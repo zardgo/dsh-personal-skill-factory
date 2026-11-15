@@ -1,5 +1,5 @@
 import { generatePrompt, requestDraft, parseJson } from './model.mjs';
-import { architecture, error } from './architecture-store.mjs';
+import { architecture, error, hash } from './architecture-store.mjs';
 
 export function createBlueprintGenerator(engine, run) {
   return async function generate(input) {
@@ -14,9 +14,27 @@ export function createBlueprintGenerator(engine, run) {
     const methods=blueprint.methodIds.map(id=>a.methods[id]);
     const {baseline,...spec}=blueprint;
     const prompt=generatePrompt({method:{name:spec.title,problem:spec.deliverable},project:{purpose:spec.deliverable},excerpt:''});
-    prompt.prompt+='\n实现已批准蓝图。触发、非触发和审批边界必须体现。沿用旧 Skill 行为，除非蓝图要求调整。评测用例已有独立锁定套件，请勿将示例答案写进运行指令。\n'+
-      JSON.stringify({spec,methods,evidence,priorSkill:baseline?.body});
-    if(prompt.prompt.length>34000)throw error('生成输入过长，请缩小蓝图范围',413);
+    const instruction='\n实现已批准蓝图。触发、非触发和审批边界必须体现。沿用旧 Skill 行为，除非蓝图要求调整。评测用例已有独立锁定套件，请勿将示例答案写进运行指令。\n';
+    let packet={spec,methods,evidence,priorSkill:baseline?.body};
+    const room=34000-prompt.prompt.length-instruction.length;
+    if(JSON.stringify(packet).length>room){
+      // Full source evidence is retained for provenance; no excerpts are
+      // represented as having been read in their entirety.
+      let fitting=null;
+      for(const excerptLength of [240,120,0]){
+        const candidate={spec,methods:methods.map(m=>({id:m.id,name:m.name,problem:m.problem,rules:m.rules,evidenceIds:m.evidenceIds})),
+          evidenceCoverage:{total:evidence.length,originalPreserved:true,mode:'excerpts',
+            warning:'以下是来源证据摘录，不是全部原文；不要据此补造未展示的事实'},
+          evidence:evidence.map(e=>({id:e.id,sourceId:e.sourceId,location:e.location,verified:e.verified,
+            originalLength:e.quote?.length||0,sha256:hash(e.quote||''),
+            excerpt:excerptLength?e.quote?.slice(0,excerptLength):'',excerptOnly:true})),
+          priorSkill:baseline?.body};
+        if(JSON.stringify(candidate).length<=room){fitting=candidate;break;}
+      }
+      if(!fitting)throw error('生成蓝图自身或前版 Skill 过长，超过模型上下文预算；未截断原始资料，请缩小能力边界',413);
+      packet=fitting;
+    }
+    prompt.prompt+=instruction+JSON.stringify(packet);
     const result=await requestDraft(run,input,prompt);
     await engine.transact(db=>{
       const record=architecture(db).blueprints[blueprint.id];

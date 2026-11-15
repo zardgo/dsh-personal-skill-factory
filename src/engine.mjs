@@ -1,5 +1,5 @@
 import { gateFor } from './eval-service.mjs';
-import { architecture, recordBuild, recordEval, recordRelease } from './architecture-store.mjs';
+import { architecture, key, recordBuild, recordEval, recordRelease } from './architecture-store.mjs';
 import { judgeOutputs } from './blueprint-generator.mjs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -383,6 +383,61 @@ export function createEngine(options={}){
  }
  async function repair(input){const db=await state(),p=get(db,input.slug);if(input.allowModelSend!==true)throw fail('修复建议需要将失败输出发送给模型，请先确认',403);if(!modelRunner)throw fail('DSH LLM 服务不可用',503);const run=(db.modelRuns||[]).find(x=>x.id===input.runId&&x.slug===p.slug);if(!run)throw fail('真实模型测试记录不存在',404);if(run.revision!==p.revision||run.stale)throw fail('该评测基于旧版 Skill，请重新运行当前版本 Evals 后再修复',409);if(run.fail+run.needsReview+run.errors===0)throw fail('该测试没有失败或待审案例，不必自动修复',409);const draft=Object.fromEntries(['title','description','trigger','inputs','outputs','steps','rules','limits','testPlan'].map(k=>[k,p[k]||'']));const pr=repairPrompt({draft,evalRun:run});const res=await modelRunner({...input,...pr,maxTokens:3500});return {draft:validateDraft(parseJson(res.text)),basedOn:run.id,requiresReview:true,notApplied:true};}
 
+ async function createFromTaskPlan(input){
+   if(input.approved!==true)throw fail('必须先审核并明确批准任务草稿',403);
+   return update(db=>{
+     const item=db.taskPlans?.[input.planId];
+     if(!item)throw fail('任务方案不存在',404);
+     if(item.projectSlug)return get(db,item.projectSlug); // Idempotent after a successful approval.
+     if(item.status!=='proposed'||item.decision!=='CREATE'||!item.draft)throw fail('此任务方案不允许生成新 Skill',409);
+     if(!Number.isInteger(input.revision)||item.revision!==input.revision)throw fail('任务方案版本已变化，重新审核后再创建',409);
+     const draft=validateDraft(item.draft);
+     if(draft.testPlan.split(/\r?\n/).filter(Boolean).length<6)throw fail('评测用例不足六条，拒绝创建草稿',409);
+     let slug=safeSlug('task-'+sha(item.id).slice(0,14));
+     if(db.projects.some(p=>p.slug===slug))throw fail('任务项目 ID 已存在，拒绝覆盖',409);
+     const stamp=now();
+     const sourceReferences=[];
+     const grouped=new Map();
+     for(const e of item.sourceExcerpts||[]){
+       if(!e?.sha256||!e?.documentName||!e?.projectSlug||!e?.documentId)continue;
+       const k=e.projectSlug+'|'+e.documentId;
+       if(!grouped.has(k))grouped.set(k,{name:e.documentName,sha256:e.sha256,sourceProjectSlug:e.projectSlug,documentId:e.documentId,
+         truncated:Boolean(e.truncated),methods:[]});
+       grouped.get(k).methods.push({name:'任务检索片段（不等于整本书已核验）',chunkIndex:'解析文本偏移 '+e.offset,
+         start:e.offset,end:e.offset+e.text.length,verified:true,evidence:[{quote:e.text}]});
+     }
+     sourceReferences.push(...grouped.values());
+     // A task-first Skill is still a blueprint Skill. Its original evaluation
+     // fixtures are pending explicit approval and must pass real Trigger +
+     // Execution A/B gates; the old non-blueprint publishing shortcut is NEVER used.
+     const suiteId=key('task-suite',item.id,draft.testPlan);
+     const blueprintId=key('task-blueprint',item.id);
+     const cases=draft.testPlan.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).map((line,i)=>{
+       const sep=line.indexOf('||');
+       const scenario=line.slice(0,sep).trim(),expected=line.slice(sep+2).trim();
+       const kind=/^(?:正常|normal)[：:]/i.test(scenario)?'normal':/^(?:缺失|missing)[：:]/i.test(scenario)?'missing':
+         /^(?:对抗|adversarial)[：:]/i.test(scenario)?'adversarial':'non-trigger';
+       return {id:'test-'+(i+1),kind,input:scenario,materials:[],triggerExpected:kind!=='non-trigger',
+         expectations:[{id:'assertion-1',rule:expected,critical:kind==='adversarial',requiredMaterialIds:[]}]};
+     });
+     const a=architecture(db);
+     a.evalSuites[suiteId]={id:suiteId,cases,plan:draft.testPlan,source:'task-first',createdAt:stamp};
+     a.blueprints[blueprintId]={id:blueprintId,title:draft.title,trigger:draft.trigger,
+       exclusions:'与描述的真实任务无关的请求不触发；非触发用例必须不调用此 Skill。',
+       deliverable:draft.outputs,boundaries:draft.limits,sourceIds:[],evidenceIds:[],methodIds:[],
+       evalSuiteId:suiteId,taskPlanId:item.id,status:'approved',approvedAt:stamp,
+       approvalReason:'用户明确审核并批准任务方案',projectSlug:slug};
+     db.evalV2??={suites:{},runs:[],workspaces:{}};
+     db.evalV2.suites[suiteId]={id:suiteId,slug,blueprintId,parentId:suiteId,
+       reason:'任务驱动的首版冻结评测集，仍需另行人工审批',cases,createdAt:stamp,approvedAt:null};
+     const project=normalize({slug,...draft,sourceType:'problem',purpose:item.goal,sourceReferences,
+       sourceTitle:sourceReferences.map(s=>s.name).join('、').slice(0,500),taskPlanId:item.id,
+       blueprintId,evalSuiteV2Id:suiteId,rights:'unknown',status:'draft',revision:1,createdAt:stamp,updatedAt:stamp});
+     db.projects.unshift(project);
+     item.projectSlug=slug;item.status='accepted';item.acceptedAt=stamp;item.revision++;
+     return project;
+   });
+ }
  async function createFromBlueprint(id,draft){
    return update(db=>{
      const a=architecture(db),bp=a.blueprints[id];
@@ -413,5 +468,5 @@ export function createEngine(options={}){
    if(sha(body)!==build.hash)throw fail('Skill 内容已变化',409);
    return {build,body};
  }
- return {root,publishRoot,state,verifiedBuild,create,save,lint,build,publish,rollback,check,markdown,upload,analyze,resetAnalysis,synthesize,finalizeSynthesis,propose,fork,evaluationProgress,evaluate,repair,proposalRecords,transact:update,readDocument:(slug,doc)=>documentText(root,slug,doc),createFromBlueprint};
+ return {root,publishRoot,state,verifiedBuild,create,save,lint,build,publish,rollback,check,markdown,upload,analyze,resetAnalysis,synthesize,finalizeSynthesis,propose,fork,evaluationProgress,evaluate,repair,proposalRecords,transact:update,readDocument:(slug,doc)=>documentText(root,slug,doc),createFromBlueprint,createFromTaskPlan};
 }

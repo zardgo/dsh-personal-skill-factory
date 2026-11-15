@@ -127,7 +127,7 @@ export function createEvalService(engine,run,{sessionsRoot=path.join(os.homedir(
     const {db,p,blueprint,suite}=await context(input,{approval:false,build:false});
     const original=architecture(db).evalSuites[blueprint.evalSuiteId];
     const history=book(db).runs.filter(r=>r.slug===p.slug);
-    return {original,suite,pending:Object.values(book(db).suites).filter(s=>s.slug===p.slug&&!s.approvedAt),
+    return {original,suite,workspaces:Object.values(book(db).workspaces).filter(w=>w.suiteId===suite?.id&&w.versionId===p.build?.skillVersionId).map(w=>({id:w.id,cwd:w.cwd,prompts:(suite?.cases||[]).map(test=>({id:test.id,prompt:businessPrompt(test)}))})),pending:Object.values(book(db).suites).filter(s=>s.slug===p.slug&&!s.approvedAt),
       runs:history,gate:gateFor(db,p,input.provider,input.model)};
   }
   return {propose,approve,execution,suiteExecution,stage,trigger,status};

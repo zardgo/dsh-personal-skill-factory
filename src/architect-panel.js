@@ -1,7 +1,8 @@
-function ArchitectPanel({call,waitForJob,models,onOpen}) {
+function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
   const [data,setData]=React.useState(null);
   const [busy,setBusy]=React.useState(false);
   const [message,setMessage]=React.useState('');
+  const [planProgress,setPlanProgress]=React.useState(null);
   const [kind,setKind]=React.useState('business-task');
   const [title,setTitle]=React.useState('');
   const [text,setText]=React.useState('');
@@ -11,30 +12,68 @@ function ArchitectPanel({call,waitForJob,models,onOpen}) {
   const [planId,setPlanId]=React.useState('');
   const [choice,setChoice]=React.useState('');
   const [sent,setSent]=React.useState(false);
-  const [edits,setEdits]=React.useState('');
+  const [overrides,setOverrides]=React.useState({});
+  const [mergeIds,setMergeIds]=React.useState([]);
   const [assets,setAssets]=React.useState(null);
   const [accepted,setAccepted]=React.useState(false);
+  const [permissionAccepted,setPermissionAccepted]=React.useState(false);
   const lock=React.useRef(false);
   async function reload(){const snapshot=await call('/architecture');setData(snapshot);return snapshot;}
   React.useEffect(()=>{reload().catch(e=>setMessage(e.message));},[]);
+  React.useEffect(()=>{if(initialSourceId)setSelected(old=>[...new Set([...old,initialSourceId])]);},[initialSourceId]);
   async function action(fn) {
     if(lock.current)return;
-    lock.current=true;setBusy(true);setMessage('');
+    lock.current=true;setBusy(true);setMessage('');setPlanProgress(null);
     try{await fn();await reload();}catch(e){setMessage(e.message);}
     finally{lock.current=false;setBusy(false);}
   }
   async function job(operation, args, slug) {
     if(!sent||!choice)throw Error('请先选择模型并确认发送');
     const task=await call('/job-start',{...JSON.parse(choice),...args,operation,slug,allowModelSend:true,cwd:scope.trim()||undefined});
-    return (await waitForJob(task.id)).result;
+    return (await waitForJob(task.id,operation==='architect-plan'?5400000:540000,
+      p=>setPlanProgress(previous=>JSON.stringify(previous)===JSON.stringify(p)?previous:p))).result;
   }
   const plan=data?.plans?.[planId];
   const caps=plan?.capabilityIds?.map(id=>data.capabilities[id])||[];
   const blueprints=plan?.blueprintIds?.map(id=>data.blueprints[id])||[];
-  function editTemplate() {
-    const draft=caps.flatMap(c=>c.decision==='SPLIT'?c.partitions.map(p=>({capabilityIds:[c.id],taskIds:p.taskIds,name:p.name,decision:'CREATE',assetIds:[],reason:''})):
-      [{capabilityIds:[c.id],taskIds:c.taskIds,name:c.name,decision:c.decision,assetIds:c.assetIds,reason:c.reason}]);
-    setEdits(JSON.stringify(draft,null,2));
+  const portfolio=['ready','review-required'].includes(plan?.portfolio?.status)?plan.portfolio:null;
+  const manualChanges=mergeIds.length>0||Object.keys(overrides).length>0;
+  const decisionsLabel={CREATE:'独立新建',REUSE:'复用现有 Skill',ENHANCE:'增强已有 Skill',MERGE:'聚合为一个 Skill',SPLIT:'拆为独立能力',REFERENCE:'仅做知识参考',REJECT:'暂不生成'};
+  const actionable=new Set(['CREATE','ENHANCE','MERGE','SPLIT']);
+  const chosenDecision=c=>overrides[c.id]||c.decision;
+  function proposedCount(){
+    if(portfolio&&!manualChanges)return portfolio.skillCount;
+    let count=0;
+    for(const c of caps){
+      if(mergeIds.includes(c.id))continue;
+      const d=chosenDecision(c);
+      if(d==='SPLIT')count+=c.partitions?.length>1?c.partitions.length:c.taskIds.length;
+      else if(actionable.has(d))count++;
+    }
+    if(mergeIds.length>=2)count++;
+    return count;
+  }
+  function compileEdits(){
+    if(!mergeIds.length&&!Object.keys(overrides).length)return undefined;
+    if(mergeIds.length===1)throw Error('至少选中两项能力才能合并');
+    const result=[];
+    const merged=caps.filter(c=>mergeIds.includes(c.id));
+    if(merged.length){
+      if(merged.some(c=>!actionable.has(chosenDecision(c))))throw Error('仅可合并建议生成的任务能力；知识参考和排除项不可合并');
+      result.push({capabilityIds:merged.map(c=>c.id),taskIds:[...new Set(merged.flatMap(c=>c.taskIds))],
+        name:merged.map(c=>c.name).join(' / ').slice(0,150),decision:'MERGE',assetIds:[],reason:'人工审核：这些任务共享一个核心用户目标，建议先作为一个 Skill 的内部能力开发'});
+    }
+    for(const c of caps){
+      if(mergeIds.includes(c.id))continue;
+      const d=chosenDecision(c);
+      if(d==='SPLIT'){
+        const partitions=(c.partitions?.length>1?c.partitions:c.taskIds.map(id=>({name:data.tasks[id]?.name||c.name,taskIds:[id]})));
+        if(partitions.length<2)throw Error('这项能力只有一个任务，无法按任务拆分');
+        for(const part of partitions)result.push({capabilityIds:[c.id],taskIds:part.taskIds,name:part.name,decision:'CREATE',assetIds:[],reason:'人工审核：任务边界独立，按任务拆分开发'});
+      }else result.push({capabilityIds:[c.id],taskIds:c.taskIds,name:c.name,decision:d,
+        assetIds:d===c.decision?c.assetIds:[],reason:d===c.decision?c.reason:'人工审核：调整此项任务能力的生成决策'});
+    }
+    return result;
   }
   return h('div',null,
     h('h1',{className:'sf-title'},'能力架构'),
@@ -62,19 +101,70 @@ function ArchitectPanel({call,waitForJob,models,onOpen}) {
     h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:sent,onChange:e=>setSent(e.target.checked)}),'确认向选定模型发送所选资料和 Skill 元数据'),
     btn('发现任务并审查能力架构',()=>action(async()=>{
       const p=await job('architect-plan',{sourceIds:selected},'portfolio');
-      setPlanId(p.id);setEdits('');setAccepted(false);
+      setPlanId(p.id);setOverrides({});setMergeIds([]);setAccepted(false);setPermissionAccepted(false);
     }),'primary',busy||!sent||!choice||!selected.length),
-    h('div',{className:'sf-field'},h('select',{value:planId,onChange:e=>{setPlanId(e.target.value);setEdits('');setAccepted(false);}},
+    h('div',{className:'sf-field'},h('select',{value:planId,onChange:e=>{setPlanId(e.target.value);setOverrides({});setMergeIds([]);setAccepted(false);setPermissionAccepted(false);}},
       h('option',{value:''},'打开已保存规划'),...Object.values(data?.plans||{}).map(p=>h('option',{key:p.id,value:p.id},p.status+' · '+new Date(p.createdAt).toLocaleString())))),
-    ...caps.map(c=>h('details',{key:c.id},h('summary',null,c.decision+' · '+c.name),h('p',null,c.reason),
-      h('pre',{className:'sf-code'},JSON.stringify({tasks:c.taskIds.map(id=>data.tasks[id]),assets:c.assetIds,alternatives:c.alternatives,assumptions:c.assumptions,evidence:c.evidenceIds},null,2)))),
+    plan?h('div',{className:'sf-note',style:{margin:'18px 0'}},
+      '来源任务 '+(plan.taskIds?.length||0)+' 项 · 已审查能力 '+caps.length+' 簇 · '+
+      (portfolio?'AI 推荐最终创建 '+proposedCount()+' 个 Skill':'尚未完成最终 Skill 组合优化。能力簇数量不等于 Skill 数量。')):null,
+    plan?.status==='proposed'&&(!portfolio||caps.length>1)?h('div',{className:'sf-toolbar'},
+      btn(portfolio?'重新优化最终 Skill 组合':'AI 自动生成最终 Skill 组合',()=>action(async()=>{
+        await job('architect-optimize',{planId,revision:plan.revision},planId);
+        setOverrides({});setMergeIds([]);setPermissionAccepted(false);
+        setMessage('最终 Skill 推荐方案已保存；原始任务、证据和能力簇均保留');
+      }),'primary',busy||!choice||!sent),
+      plan.portfolio?.status==='needs-review'?h('span',{role:'status',className:'sf-caption'},'上次自动优化未通过校验：'+plan.portfolio.error):null):null,
+    portfolio?h('div',{className:'sf-panel',style:{margin:'14px 0',padding:16}},
+      h('h2',{className:'sf-section-title'},'推荐的 Skill 组合'),
+      h('p',{className:'sf-sub'},'同一 Skill 可以包含多种触发与内部任务，但不能混合不清楚的角色或权限边界。以下是待审批建议，不会自动创建或发布。角色名称不等于真实系统权限，涉及敏感操作须人工复核。'),
+      ...portfolio.groups.map((g,i)=>h('div',{key:g.id,className:'sf-panel',style:{margin:'10px 0'}},
+        h('div',{className:'sf-between'},h('h3',null,(i+1)+'. '+g.name),
+          h('span',{className:'sf-tag'},g.capabilityIds.length>1?'整合 '+g.capabilityIds.length+' 项能力':'独立能力')),
+        h('p',null,'共同目标：'+g.sharedGoal),
+        h('p',{className:'sf-sub'},'推荐理由：'+g.reason),
+        h('p',{className:'sf-caption'},'角色与权限假设（待核实）：'+g.roleBoundary),
+        h('p',{className:'sf-caption'},'不适用：'+g.exclusions),
+        h('details',null,h('summary',null,'查看内部能力、任务映射与来源依据'),
+          ...g.capabilityIds.map(id=>{
+            const c=data.capabilities[id];
+            return c?h('div',{key:id,style:{padding:'8px 0'}},h('strong',null,c.name),
+              h('p',{className:'sf-caption'},'原始任务：'+c.taskIds.map(tid=>data.tasks[tid]?.name||tid).join('、')),
+              h('p',{className:'sf-caption'},'证据标识：'+c.evidenceIds.join('、'))):null;
+          }))),
+      ),
+      portfolio.status==='review-required'?h('div',{className:'sf-note',style:{margin:'12px 0'}},
+        h('strong',null,'权限待审核：'+portfolio.reviewIssues.length+' 个组合涉及角色差异或边界数据不足。'),
+        h('p',{className:'sf-caption'},'角色名称不同不代表权限冲突。系统保留最终推荐，但不授予新权限；外部操作、敏感数据和审批仍需单独授权。'),
+        ...portfolio.reviewIssues.map(item=>h('details',{key:item.groupId},h('summary',null,item.groupName+' · '+(item.actors||[]).join('、')),h('p',null,item.reasons.join('；')))),
+        plan?.status==='proposed'?h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:permissionAccepted,onChange:e=>setPermissionAccepted(e.target.checked)}),
+          '我已审查上述跨角色与缺失边界，理解此处仅批准 Skill 组合设计，不赋予任何外部系统权限'):null):null,
+      caps.some(c=>['ENHANCE','SPLIT'].includes(c.decision))?h('details',null,h('summary',null,'保留独立的增强/拆分能力'),
+        ...caps.filter(c=>['ENHANCE','SPLIT'].includes(c.decision)).map(c=>h('p',{key:c.id},c.name+' · '+decisionsLabel[c.decision]))):null,
+      caps.some(c=>!actionable.has(c.decision))?h('details',null,h('summary',null,'不生成：复用、参考与排除项'),
+        ...caps.filter(c=>!actionable.has(c.decision)).map(c=>h('p',{key:c.id},c.name+' · '+decisionsLabel[c.decision]))):null
+      ):null,
+    plan?h('details',{style:{margin:'14px 0'}},
+      h('summary',null,'高级：展开原始 '+caps.length+' 个能力簇，手动修改合并/拆分'),
+      h('p',{className:'sf-caption'},'以下操作是专家覆盖模式：修改任何一项后将覆盖上方 AI 推荐分组，不会暗中混合两套决策。'),
+      ...caps.map(c=>h('div',{key:c.id,className:'sf-panel',style:{margin:'10px 0'}},
+        h('div',{className:'sf-between'},h('h3',null,c.name),h('span',{className:'sf-tag'},decisionsLabel[c.decision]||c.decision)),
+        h('p',{className:'sf-sub'},c.reason),
+        h('p',{className:'sf-caption'},'关联任务：'+c.taskIds.map(id=>data.tasks[id]?.name||id).join('、')),
+        c.assetIds?.length?h('p',{className:'sf-caption'},'已有资产：'+c.assetIds.join('、')):null,
+        plan?.status==='proposed'?h('div',{className:'sf-toolbar',style:{marginTop:10}},
+          h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:mergeIds.includes(c.id),disabled:busy||!actionable.has(chosenDecision(c)),onChange:e=>setMergeIds(old=>e.target.checked?[...old,c.id]:old.filter(id=>id!==c.id))}),'与其他任务合并'),
+          h('label',{className:'sf-field',style:{margin:0}},'调整架构',h('select',{value:chosenDecision(c),onChange:e=>{const v=e.target.value;setOverrides(old=>({...old,[c.id]:v}));setMergeIds(old=>old.filter(id=>id!==c.id));}},
+            ...[c.decision,'CREATE','SPLIT','REFERENCE','REJECT'].filter((v,i,a)=>a.indexOf(v)===i&&(v!=='SPLIT'||c.taskIds.length>1||c.partitions?.length>1)).map(v=>h('option',{key:v,value:v},decisionsLabel[v]))))):null,
+        h('details',null,h('summary',null,'查看依据、备选决策与风险'),h('pre',{className:'sf-code'},JSON.stringify({tasks:c.taskIds.map(id=>data.tasks[id]),assets:c.assetIds,alternatives:c.alternatives,assumptions:c.assumptions,evidence:c.evidenceIds},null,2)))
+      ))):null,
     plan?.status==='proposed'?h('div',{className:'sf-toolbar'},
-      btn('编辑合并、拆分或排除',editTemplate,'mini',busy),
-      btn('起草待批蓝图',()=>action(async()=>{
-        await job('architect-prepare',{planId,revision:plan.revision,edits:edits?JSON.parse(edits):undefined},planId);
-        setMessage('蓝图和评测用例已保存，请审阅后批准');
-      }),'primary',busy||!choice||!sent)):null,
-    plan?.status==='proposed'&&edits?h(Field,{label:'人工架构决策 JSON（合并引用多个候选；拆分按不同任务建子项；排除用 REJECT）',value:edits,onChange:setEdits,multiline:true,rows:14}):null,
+      mergeIds.length>1?h('span',{className:'sf-tag purple'},'将选中的 '+mergeIds.length+' 项任务能力合并为一个 Skill'):null,
+      btn('重置为系统推荐',()=>{setOverrides({});setMergeIds([]);},'mini',busy),
+      btn('批准推荐架构，生成待审蓝图',()=>action(async()=>{
+        await job('architect-prepare',{planId,revision:plan.revision,edits:compileEdits(),confirmPortfolioReview:permissionAccepted},planId);
+        setMessage('蓝图和测试案例已保存，请审核后批准；不会自动发布 Skill');
+      }),'primary',busy||!choice||!sent||mergeIds.length===1||plan?.portfolio?.status==='needs-review'||(portfolio?.status==='review-required'&&!permissionAccepted)||(!portfolio&&caps.filter(c=>['CREATE','MERGE'].includes(c.decision)).length>=3))):null,
     ...blueprints.map(b=>h(Card,{key:b.id},h('h3',null,b.title),h('p',null,b.trigger),h('details',null,h('summary',null,'审阅交付、边界、证据及冻结测试'),
       h('pre',{className:'sf-code'},JSON.stringify({exclusions:b.exclusions,deliverable:b.deliverable,boundaries:b.boundaries,sourceIds:b.sourceIds,baseline:b.baseline?.slug,cases:data.evalSuites[b.evalSuiteId].cases},null,2))),
       b.projectSlug?btn('打开 Skill 工程',()=>onOpen(b.projectSlug),'mini',busy):
@@ -82,6 +172,12 @@ function ArchitectPanel({call,waitForJob,models,onOpen}) {
       b.generation?.status==='needs-review'?h('pre',{className:'sf-code'},JSON.stringify(b.generation.issues,null,2)):null)),
     plan?.status==='pending'?h('div',null,h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:accepted,onChange:e=>setAccepted(e.target.checked)}),'已审核能力决策、蓝图和评测预期'),
       btn('批准当前架构与蓝图',()=>action(()=>call('/architecture/approve',{planId,revision:plan.revision,approved:true})),'primary',busy||!accepted)):null,
-    busy?h('p',{role:'status'},'工作台处理中，已完成结果会自动保存。'):null,
+    busy?h('p',{role:'status'},planProgress?.stage==='retry'?`模型本轮请求超时，正在进行最后一次自动重试（阶段：${planProgress.phase}）。已完成的批次不会丢失。`
+      :planProgress?.stage==='discover'
+      ?`正在分批理解资料：第 ${planProgress.completed}/${planProgress.total} 批。已完成批次会保存，失败后可继续。`
+      :planProgress?.stage==='reconcile'?'正在跨批次归并任务，避免按章节生成重复 Skill。'
+      :planProgress?.stage==='portfolio'?'正在全局审查能力架构与已有 Skill 资产。'
+      :planProgress?.stage==='portfolio-optimize'?'正在自动推荐最小充分 Skill 组合，校验权限边界和任务覆盖。'
+      :'工作台处理中，已完成结果会自动保存。'):null,
     message?h('p',{role:'status'},message):null);
 }

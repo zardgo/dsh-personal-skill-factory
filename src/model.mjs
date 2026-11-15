@@ -7,12 +7,14 @@ export async function availableModels(ctx){const llm=modelService(ctx);if(!llm||
 function modelError(message, code, details, status = 502) {
   return Object.assign(fail(message, status), { code, details });
 }
-export async function oneShot(ctx, { provider, model, system, prompt, maxTokens = 3000 }) {
+export async function oneShot(ctx, { provider, model, system, prompt, maxTokens = 3000, timeoutMs = 120_000 }) {
   const llm = modelService(ctx);
   if (!llm || typeof llm.stream !== 'function') throw fail('未发现 DSH LLM 服务', 503);
   if (!isStr(provider,120) || !provider || !isStr(model,180) || !model) throw fail('必须选择 DSH 中已配置的 provider/model');
   if (!(await llm.listProviders()).some(x => x.id === provider)) throw fail('所选模型提供商未在 DSH 激活', 409);
   if (typeof prompt !== 'string' || prompt.length > 70_000) throw fail('模型输入过长');
+  // Stage-specific deadline for long planning jobs; bounded so a stalled provider cannot run forever.
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 20 || timeoutMs > 360_000) throw fail('模型超时配置无效');
   const abort = new AbortController();
   let output = '', fallback = '', usage = null, finish = null;
   const details = () => ({ text:(output || fallback).slice(0, MAX_OUTPUT).trim(), usage, provider, model, maxTokens, finish:finish?.kind ?? null });
@@ -21,7 +23,7 @@ export async function oneShot(ctx, { provider, model, system, prompt, maxTokens 
     timer = setTimeout(() => {
       reject(modelError('模型响应超时', 'MODEL_TIMEOUT', details(), 504));
       abort.abort();
-    }, 120_000);
+    }, timeoutMs);
   });
   const stream = async () => {
     for await (const chunk of llm.stream({provider, model, system, messages:[{role:'user',content:[{type:'text',text:prompt}]}], maxTokens, signal:abort.signal})) {
