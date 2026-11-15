@@ -33,10 +33,16 @@ test('Portfolio optimizer refuses missing, repeated and protected capability IDs
  assert.throws(()=>check([group('Unknown',['cap-0','cap-ghost']),group('Other',['cap-1'])]),/越界|禁止/);
 });
 
-test('Portfolio optimizer rejects cross-role merges and unreviewed boundary data',()=>{
+test('Portfolio optimizer preserves cross-role recommendations as review-required, without auto-approval',()=>{
  const candidates=[cap(0),cap(1)];
  const tasks={'task-0':task(0,'Manager'),'task-1':task(1,'Finance Controller')};
- assert.throws(()=>validatePortfolioProposal({groups:[group('Unsafe',['cap-0','cap-1'])]},candidates,tasks),/跨角色/);
+ const proposed=validatePortfolioProposal({groups:[group('Advisory management coach',['cap-0','cap-1'])]},candidates,tasks);
+ assert.equal(proposed.status,'review-required');
+ assert.equal(proposed.skillCount,1);
+ assert.equal(proposed.reviewIssues.length,1);
+ assert.deepEqual(proposed.groups[0].actors,['finance controller','manager']);
+ assert.throws(()=>editsForPortfolio(proposed,candidates),/尚未审阅/);
+ assert.equal(editsForPortfolio(proposed,candidates,{confirmPermissionReview:true})[0].decision,'MERGE');
  // Singletons are allowed without falsely claiming permission equivalence.
  const p=validatePortfolioProposal({groups:[group('Manager',['cap-0']),group('Finance',['cap-1'])]},candidates,tasks);
  assert.equal(p.skillCount,2);
@@ -44,7 +50,9 @@ test('Portfolio optimizer rejects cross-role merges and unreviewed boundary data
  const cs={...cap(0),taskIds:[...Array.from({length:20},(_,i)=>'b-'+i)]};
  const ds=Object.fromEntries(cs.taskIds.map((id,i)=>[id,{...broad,id,trigger:'Different trigger '+i,output:'Different output '+i,actor:'Manager'}]));
  ds['task-1']=task(1);
- assert.throws(()=>validatePortfolioProposal({groups:[group('Hidden',['cap-0','cap-1'])]},[cs,cap(1)],ds),/未展示/);
+ const omitted=validatePortfolioProposal({groups:[group('Hidden',['cap-0','cap-1'])]},[cs,cap(1)],ds);
+ assert.equal(omitted.status,'review-required');
+ assert.ok(omitted.reviewIssues[0].reasons.some(x=>x.includes('未展示')));
 });
 
 test('Portfolio optimizer protects existing enhanced, split and reused capabilities',()=>{
@@ -56,4 +64,15 @@ test('Portfolio optimizer protects existing enhanced, split and reused capabilit
  const edits=editsForPortfolio(p,[c0,c1,c2,c3]);
  assert.deepEqual(edits.map(x=>x.decision),['CREATE','ENHANCE','CREATE','CREATE','REUSE']);
  assert.deepEqual(edits.flatMap(x=>x.taskIds),['task-0','task-1','task-2','task-3','task-4']);
+});
+
+test('model prose cannot bypass role review or invalid portfolio coverage',()=>{
+ const candidates=[cap(0),cap(1)];
+ const tasks={'task-0':task(0,'HR'),'task-1':task(1,'Finance')};
+ const raw={groups:[group('Admin roles',['cap-0','cap-1'])]};
+ raw.groups[0].roleBoundary='模型声明已授权，可自动执行写操作';
+ const portfolio=validatePortfolioProposal(raw,candidates,tasks);
+ assert.equal(portfolio.status,'review-required');
+ assert.throws(()=>editsForPortfolio(portfolio,candidates),/审阅/);
+ assert.throws(()=>validatePortfolioProposal({groups:[group('Only HR',['cap-0'])]},candidates,tasks),/完整覆盖/);
 });

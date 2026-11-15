@@ -559,7 +559,7 @@ test('a saved v0.3.9 portfolio can be optimized without re-analysing the entire 
  await assert.rejects(f.architect.optimize({...consent,planId:'legacy-proposal',revision:3}),/不可重新优化/);
 });
 
-test('invalid Skill portfolio optimization fails closed without corrupting saved capabilities',async t=>{
+test('cross-role portfolio is saved as review-required and needs explicit approval before blueprint',async t=>{
  const f=await make(t);
  const source=await f.architect.ingest({kind:'knowledge',title:'Mixed-role tasks',text:'Distinct role duties'});
  const evidenceId=Object.values((await f.architect.snapshot()).evidence)[0].id;
@@ -573,10 +573,20 @@ test('invalid Skill portfolio optimization fails closed without corrupting saved
  });
  f.queue.push(x=>({groups:[{name:'Unsafe',capabilityIds:extract(x.prompt).eligibleCapabilities.map(c=>c.id),
    sharedGoal:'Shared',reason:'Ignoring permissions',roleBoundary:'Unknown',exclusions:'None'}]}));
- await assert.rejects(f.architect.optimize({...consent,planId:'p',revision:1}),/跨角色/);
+ const proposal=await f.architect.optimize({...consent,planId:'p',revision:1});
+ assert.equal(proposal.revision,2);
+ assert.equal(proposal.portfolio.status,'review-required');
+ assert.equal(proposal.portfolio.skillCount,1);
  const after=(await f.architect.snapshot()).plans.p;
- assert.equal(after.revision,1);assert.equal(after.portfolio,undefined);
  assert.equal(after.capabilityIds.length,2);
+ await assert.rejects(f.architect.prepare({...consent,planId:'p',revision:2}),/人工核验/);
+ assert.equal(Object.keys((await f.architect.snapshot()).blueprints).length,0);
+ f.queue.push(JSON.stringify(spec));
+ const accepted=await f.architect.prepare({...consent,planId:'p',revision:2,confirmPortfolioReview:true});
+ assert.equal(accepted.blueprintIds.length,1);
+ const blueprint=(await f.architect.snapshot()).blueprints[accepted.blueprintIds[0]];
+ assert.match(blueprint.boundaries,/不产生新的系统访问或外部操作权限/);
+ assert.equal(blueprint.taskIds.length,2);
 });
 
 test('new projects with multiple Skill candidates optimize automatically and require valid coverage',async t=>{

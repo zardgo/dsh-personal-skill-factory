@@ -25,7 +25,7 @@ const HIERARCHY_PAGE_SIZE=24;
 const MAX_HIERARCHY_LEVELS=8;
 const DISCOVERY_BATCH_LIMIT=36000;
 const EVIDENCE_PART_LENGTH=3000;
-const BLUEPRINT_INSTRUCTION='设计 Skill 蓝图，不写成品。明确触发、非触发、任务交付、审批边界。设计至少6条互异测试，包括 normal 至少3条、missing 至少1条、adversarial 至少1条、non-trigger 至少1条。每案例至少一个具体可观察行为。不要提供答案给待测模型。格式 {"title":"","trigger":"","exclusions":"","deliverable":"","boundaries":"","cases":[{"kind":"normal","input":"","expectations":["具体行为"]}]}。';
+const BLUEPRINT_INSTRUCTION='设计 Skill 蓝图，不写成品。若该 Skill 是跨角色知识与建议的聚合，不得因此授予任何角色新的系统权限；涉及外部写入、审批、数据访问或敏感操作时必须由实际权限系统和责任人单独授权。明确触发、非触发、任务交付、审批边界。设计至少6条互异测试，包括 normal 至少3条、missing 至少1条、adversarial 至少1条、non-trigger 至少1条。每案例至少一个具体可观察行为。不要提供答案给待测模型。格式 {"title":"","trigger":"","exclusions":"","deliverable":"","boundaries":"","cases":[{"kind":"normal","input":"","expectations":["具体行为"]}]}。';
 const DISCOVER_INSTRUCTION='发现可重复执行的业务任务。纯知识也可登记为 task，但 recurring=false。记录操作人、触发、输入、可验收输出与不确定项。使用 evidenceIds、methodIds 关联材料。格式 {"tasks":[{"name":"","trigger":"","actor":"","inputs":"","output":"","recurring":true,"uncertainties":[],"evidenceIds":[],"methodIds":[]}]}。按实际任务划界，章节和方法数量不决定任务或 Skill 数量。';
 const REVIEW_INSTRUCTION='将任务聚类并审查复用。每个 task 必须且只能进入一个最终 capability；不同能力之间若共享方法可在执行时引用，不应重复归属。同触发、同交付、同权限的多方法优先 MERGE。不同触发与交付或权限边界，需要 SPLIT 且每个子组列独立 taskIds。CREATE 前比较已有 Skill；REUSE 指定可直接复用的 assetIds；ENHANCE 仅指一个 managed 资产，须指出既有资产缺口；REFERENCE 用于仅需知识参考；REJECT 用于依据不足。禁止按章节或数量分组。输出 {"capabilities":[{"name":"","taskIds":[],"decision":"CREATE|REUSE|ENHANCE|MERGE|SPLIT|REFERENCE|REJECT","assetIds":[],"reason":"","alternatives":[{"decision":"REUSE","reason":""}],"assumptions":[],"partitions":[{"name":"","taskIds":[]}]}]}';
 const sourceInfo=sources=>sources.map(({body,...source})=>source);
@@ -592,9 +592,9 @@ export function createArchitect(engine, run, catalog) {
     if(plan.revision!==input.revision)throw error('规划版本已变化，刷新后重试',409);
     return plan;
   }
-  function architectureSelection(a,p,edits) {
+  function architectureSelection(a,p,edits,confirmation=false) {
     const capabilities=p.capabilityIds.map(id=>a.capabilities[id]);
-    if(!edits&&p.portfolio?.status==='ready')edits=editsForPortfolio(p.portfolio,capabilities);
+    if(!edits&&['ready','review-required'].includes(p.portfolio?.status))edits=editsForPortfolio(p.portfolio,capabilities,{confirmPermissionReview:confirmation===true});
     if(!edits&&(p.portfolio?.status==='needs-review'||capabilities.filter(c=>c.decision==='CREATE'||c.decision==='MERGE').length>=PORTFOLIO_AUTO_THRESHOLD))
       throw error('最终 Skill 组合尚未完成自动优化；请先优化，或明确提交人工架构决策',409);
     if(!edits)return capabilities;
@@ -616,7 +616,9 @@ export function createArchitect(engine, run, catalog) {
         if(!evidence.some(id=>a.evidence[id]?.verified))throw error('待生成能力缺少可核查来源证据');
       }
       if(edit.decision==='MERGE'&&selected.length<2&&new Set(selected.flatMap(id=>a.tasks[id]?.methodIds||[])).size<2)throw error('合并必须包含多个真实任务或方法');
-      const row={name:required(edit.name,'能力名称'),decision:edit.decision,taskIds:selected,
+      const actorNames=[...new Set(selected.map(id=>a.tasks[id]?.actor?.trim().normalize('NFKC').toLowerCase()).filter(Boolean))];
+      const roleReviewRequired=edit.decision==='MERGE'&&(actorNames.length>1||actorNames.length<selected.length&&actorNames.length===0);
+      const row={name:required(edit.name,'能力名称'),decision:edit.decision,taskIds:selected,roleReviewRequired,
         reason:required(edit.reason,'人工变更原因'),assetIds:assets,
         alternatives:base.map(c=>({decision:c.decision,reason:c.reason})),assumptions:base.flatMap(c=>c.assumptions),
         evidenceIds:[...new Set(base.flatMap(c=>c.evidenceIds))],partitions:[],supersedes:refs};
@@ -631,7 +633,9 @@ export function createArchitect(engine, run, catalog) {
   async function prepare(input) {
     const db=await engine.state(),a=architecture(db),p=getPlan(a,input);
     if(p.status!=='proposed')throw error('当前规划已有蓝图',409);
-    const selected=architectureSelection(a,p,input.edits);
+    if(p.portfolio?.status==='review-required'&&input.confirmPortfolioReview!==true)
+      throw error('跨角色 Skill 组合仍待人工核验；确认审阅角色与权限边界后才可生成蓝图',403);
+    const selected=architectureSelection(a,p,input.edits,input.confirmPortfolioReview);
     const units=selected.flatMap(c=>c.decision==='SPLIT'?c.partitions.map(part=>({capability:c,name:part.name,taskIds:part.taskIds})):
       executable.has(c.decision)?[{capability:c,name:c.name,taskIds:c.taskIds}]:[]);
     const drafts=[];
@@ -655,8 +659,10 @@ export function createArchitect(engine, run, catalog) {
       });
       if(cases.filter(c=>c.kind==='normal').length<3||[...evalKinds].some(k=>!cases.some(c=>c.kind===k))||new Set(cases.map(c=>c.input)).size!==cases.length)throw error('测试套件缺少独立场景覆盖');
       const plan=cases.map(c=>c.input.replaceAll('||','｜｜')).join('\n');
+      const permissionGuard='跨角色组合只用于知识、建议与草稿输出，不产生新的系统访问或外部操作权限；涉及敏感数据、工具调用、外部写入或审批，必须另行完成实际权限核验与责任人授权。';
+      const boundaries=required(proposal.boundaries,'审批边界',c.roleReviewRequired?2200:2500)+(c.roleReviewRequired?'\n'+permissionGuard:'');
       const fields={title:required(proposal.title,'蓝图标题',100),trigger:required(proposal.trigger,'触发条件'),exclusions:required(proposal.exclusions,'非触发条件'),
-        deliverable:required(proposal.deliverable,'任务交付'),boundaries:required(proposal.boundaries,'审批边界'),planId:p.id,capabilityId:c.id,taskIds:unit.taskIds,
+        deliverable:required(proposal.deliverable,'任务交付'),boundaries,planId:p.id,capabilityId:c.id,taskIds:unit.taskIds,
         methodIds,evidenceIds,sourceIds:[...new Set(evidenceIds.map(id=>a.evidence[id].sourceId))],baseline,
         evidenceContextMode,evalSuiteId:key('suite',cases),status:'pending'};
       drafts.push({suite:{id:fields.evalSuiteId,cases,plan},blueprint:{id:key('blueprint',fields),...fields}});

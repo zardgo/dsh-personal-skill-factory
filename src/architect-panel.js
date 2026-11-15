@@ -16,6 +16,7 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
   const [mergeIds,setMergeIds]=React.useState([]);
   const [assets,setAssets]=React.useState(null);
   const [accepted,setAccepted]=React.useState(false);
+  const [permissionAccepted,setPermissionAccepted]=React.useState(false);
   const lock=React.useRef(false);
   async function reload(){const snapshot=await call('/architecture');setData(snapshot);return snapshot;}
   React.useEffect(()=>{reload().catch(e=>setMessage(e.message));},[]);
@@ -35,7 +36,7 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
   const plan=data?.plans?.[planId];
   const caps=plan?.capabilityIds?.map(id=>data.capabilities[id])||[];
   const blueprints=plan?.blueprintIds?.map(id=>data.blueprints[id])||[];
-  const portfolio=plan?.portfolio?.status==='ready'?plan.portfolio:null;
+  const portfolio=['ready','review-required'].includes(plan?.portfolio?.status)?plan.portfolio:null;
   const manualChanges=mergeIds.length>0||Object.keys(overrides).length>0;
   const decisionsLabel={CREATE:'独立新建',REUSE:'复用现有 Skill',ENHANCE:'增强已有 Skill',MERGE:'聚合为一个 Skill',SPLIT:'拆为独立能力',REFERENCE:'仅做知识参考',REJECT:'暂不生成'};
   const actionable=new Set(['CREATE','ENHANCE','MERGE','SPLIT']);
@@ -100,9 +101,9 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
     h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:sent,onChange:e=>setSent(e.target.checked)}),'确认向选定模型发送所选资料和 Skill 元数据'),
     btn('发现任务并审查能力架构',()=>action(async()=>{
       const p=await job('architect-plan',{sourceIds:selected},'portfolio');
-      setPlanId(p.id);setOverrides({});setMergeIds([]);setAccepted(false);
+      setPlanId(p.id);setOverrides({});setMergeIds([]);setAccepted(false);setPermissionAccepted(false);
     }),'primary',busy||!sent||!choice||!selected.length),
-    h('div',{className:'sf-field'},h('select',{value:planId,onChange:e=>{setPlanId(e.target.value);setOverrides({});setMergeIds([]);setAccepted(false);}},
+    h('div',{className:'sf-field'},h('select',{value:planId,onChange:e=>{setPlanId(e.target.value);setOverrides({});setMergeIds([]);setAccepted(false);setPermissionAccepted(false);}},
       h('option',{value:''},'打开已保存规划'),...Object.values(data?.plans||{}).map(p=>h('option',{key:p.id,value:p.id},p.status+' · '+new Date(p.createdAt).toLocaleString())))),
     plan?h('div',{className:'sf-note',style:{margin:'18px 0'}},
       '来源任务 '+(plan.taskIds?.length||0)+' 项 · 已审查能力 '+caps.length+' 簇 · '+
@@ -110,7 +111,7 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
     plan?.status==='proposed'&&(!portfolio||caps.length>1)?h('div',{className:'sf-toolbar'},
       btn(portfolio?'重新优化最终 Skill 组合':'AI 自动生成最终 Skill 组合',()=>action(async()=>{
         await job('architect-optimize',{planId,revision:plan.revision},planId);
-        setOverrides({});setMergeIds([]);
+        setOverrides({});setMergeIds([]);setPermissionAccepted(false);
         setMessage('最终 Skill 推荐方案已保存；原始任务、证据和能力簇均保留');
       }),'primary',busy||!choice||!sent),
       plan.portfolio?.status==='needs-review'?h('span',{role:'status',className:'sf-caption'},'上次自动优化未通过校验：'+plan.portfolio.error):null):null,
@@ -132,6 +133,12 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
               h('p',{className:'sf-caption'},'证据标识：'+c.evidenceIds.join('、'))):null;
           }))),
       ),
+      portfolio.status==='review-required'?h('div',{className:'sf-note',style:{margin:'12px 0'}},
+        h('strong',null,'权限待审核：'+portfolio.reviewIssues.length+' 个组合涉及角色差异或边界数据不足。'),
+        h('p',{className:'sf-caption'},'角色名称不同不代表权限冲突。系统保留最终推荐，但不授予新权限；外部操作、敏感数据和审批仍需单独授权。'),
+        ...portfolio.reviewIssues.map(item=>h('details',{key:item.groupId},h('summary',null,item.groupName+' · '+(item.actors||[]).join('、')),h('p',null,item.reasons.join('；')))),
+        plan?.status==='proposed'?h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:permissionAccepted,onChange:e=>setPermissionAccepted(e.target.checked)}),
+          '我已审查上述跨角色与缺失边界，理解此处仅批准 Skill 组合设计，不赋予任何外部系统权限'):null):null,
       caps.some(c=>['ENHANCE','SPLIT'].includes(c.decision))?h('details',null,h('summary',null,'保留独立的增强/拆分能力'),
         ...caps.filter(c=>['ENHANCE','SPLIT'].includes(c.decision)).map(c=>h('p',{key:c.id},c.name+' · '+decisionsLabel[c.decision]))):null,
       caps.some(c=>!actionable.has(c.decision))?h('details',null,h('summary',null,'不生成：复用、参考与排除项'),
@@ -155,9 +162,9 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
       mergeIds.length>1?h('span',{className:'sf-tag purple'},'将选中的 '+mergeIds.length+' 项任务能力合并为一个 Skill'):null,
       btn('重置为系统推荐',()=>{setOverrides({});setMergeIds([]);},'mini',busy),
       btn('批准推荐架构，生成待审蓝图',()=>action(async()=>{
-        await job('architect-prepare',{planId,revision:plan.revision,edits:compileEdits()},planId);
+        await job('architect-prepare',{planId,revision:plan.revision,edits:compileEdits(),confirmPortfolioReview:permissionAccepted},planId);
         setMessage('蓝图和测试案例已保存，请审核后批准；不会自动发布 Skill');
-      }),'primary',busy||!choice||!sent||mergeIds.length===1||plan?.portfolio?.status==='needs-review'||(!portfolio&&caps.filter(c=>['CREATE','MERGE'].includes(c.decision)).length>=3))):null,
+      }),'primary',busy||!choice||!sent||mergeIds.length===1||plan?.portfolio?.status==='needs-review'||(portfolio?.status==='review-required'&&!permissionAccepted)||(!portfolio&&caps.filter(c=>['CREATE','MERGE'].includes(c.decision)).length>=3))):null,
     ...blueprints.map(b=>h(Card,{key:b.id},h('h3',null,b.title),h('p',null,b.trigger),h('details',null,h('summary',null,'审阅交付、边界、证据及冻结测试'),
       h('pre',{className:'sf-code'},JSON.stringify({exclusions:b.exclusions,deliverable:b.deliverable,boundaries:b.boundaries,sourceIds:b.sourceIds,baseline:b.baseline?.slug,cases:data.evalSuites[b.evalSuiteId].cases},null,2))),
       b.projectSlug?btn('打开 Skill 工程',()=>onOpen(b.projectSlug),'mini',busy):

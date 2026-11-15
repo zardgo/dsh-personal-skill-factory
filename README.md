@@ -1,6 +1,14 @@
-# DSH Skill Factory v0.3.10（最终 Skill 组合优化候选版）
+# DSH Skill Factory v0.3.11（跨角色组合待审候选版）
 
 > 保留通用 Skill Architect 的业务模型，不对 OKR 书籍做特例；**仍需在用户 Mac 的真实 DSH 中验证**。不裁剪整本书，也不将不同任务为了凑 Skill 数量而合并。
+
+## v0.3.11 更新：角色与权限不再混淆
+
+- 不再用任务执行角色的字符串差异直接拒绝整个 Skill 组合推荐；不同角色的组合保存为 `review-required`。
+- 推荐方案完整展示，原始任务与证据保留；角色或输入输出边界不完整时显示待审原因。
+- 权限待审的方案需要用户明确勾选、服务端确认才能生成蓝图；仍不能自动发布 Skill。
+- 已确认的跨角色蓝图附加强制约束：组合不授予外部系统权限，敏感数据、工具调用、外部写入和审批必须另行授权。
+- 新版本安装后直接对已经保存的 47 任务 / 34 能力簇执行“AI 自动生成最终 Skill 组合”，无需重新导入或重做书籍分析。
 
 ## v0.3.10 更新：Skill Portfolio Optimizer
 
@@ -67,7 +75,7 @@ npm run check
 npm pack
 # 完全退出 DSH；按需先备份 ~/.dsh/skill-factory
 # dsh plugin --profile desktop remove dsh-personal-skill-factory
-# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.3.10.tgz
+# dsh plugin --profile desktop add /path/to/dsh-personal-skill-factory-0.3.11.tgz
 # dsh plugin --profile desktop list --depth 0
 ```
 

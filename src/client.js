@@ -3,7 +3,7 @@ var module = { exports: {} }; var exports = module.exports;
 'use strict';
 const React = require('react');
 const h = React.createElement;
-const VERSION='0.3.10';
+const VERSION='0.3.11';
 const DRAFT_FIELDS=['title','description','trigger','inputs','outputs','steps','rules','limits','testPlan'];
 const NS='personal.skillFactory';
 const ID='personal-skill-factory';
