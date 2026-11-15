@@ -164,3 +164,36 @@ test('manual architecture edits cannot duplicate tasks or promote unverified ref
  ]}),/重复执行|证据/);
  assert.equal(Object.keys((await f.architect.snapshot()).blueprints).length,0);
 });
+
+test('eight extracted methods from one legacy document can produce one Skill blueprint',async t=>{
+ const f=await make(t);
+ const body='Method 1 Method 2 Method 3 Method 4 Method 5 Method 6 Method 7 Method 8';
+ const directory=path.join(f.engine.root,'documents','legacy-book');
+ await mkdir(directory,{recursive:true});
+ const textPath=path.join(directory,'doc-eight.txt');
+ await writeFile(textPath,body);
+ await f.engine.transact(db=>{
+  const p=db.projects.find(p=>p.slug==='legacy-book');
+  p.sourceType='book';p.revision=1;
+  p.documents=[{id:'doc-eight',name:'methods.txt',sha256:hash(body),textPath}];
+  p.analysisProgressByDocument={'doc-eight':{nextChunk:1,totalChunks:1}};
+  p.analysis=Array.from({length:8},(_,i)=>({documentId:'doc-eight',name:'Method '+(i+1),problem:'Review goals',
+   rules:['Check measurability'],start:0,end:body.length,chunkIndex:1,verified:true,
+   evidence:[{quote:'Method '+(i+1)}]}));
+ });
+ const source=await f.architect.ingest({kind:'legacy',slug:'legacy-book',documentId:'doc-eight'});
+ let snap=await f.architect.snapshot();
+ assert.equal(Object.values(snap.methods).filter(m=>m.sourceId===source.id).length,8);
+ f.queue.push(x=>{
+   const data=extract(x.prompt);
+   return {tasks:[task('Review goals',data.evidence.map(e=>e.id),true,data.methods.map(m=>m.id))]};
+ },x=>({capabilities:[{name:'Goal review',taskIds:extract(x.prompt).tasks.map(t=>t.id),decision:'CREATE',
+     reason:'One user task shares all eight methods',assetIds:[],alternatives:[{decision:'REFERENCE',reason:'Keep as knowledge only'}],
+     assumptions:[],partitions:[]}]}),JSON.stringify(spec));
+ const plan=await f.architect.plan({...consent,sourceIds:[source.id]});
+ assert.equal(plan.capabilityIds.length,1);
+ const pending=await f.architect.prepare({...consent,planId:plan.id,revision:1});
+ assert.equal(pending.blueprintIds.length,1);
+ snap=await f.architect.snapshot();
+ assert.equal(snap.blueprints[pending.blueprintIds[0]].methodIds.length,8);
+});
