@@ -69,7 +69,8 @@ export function createHandler(engine=createEngine(),modelContext=null,skillCatal
   Promise.resolve().then(async()=>{
    job.status='running';
    try{
-    const result=await operations[operation](input);
+    const result=await operations[operation](operation==='architect-plan'
+      ? {...input,onProgress:progress=>{job.progress=progress;}} : input);
     if(operation==='propose'||operation.startsWith('architect-')||operation.startsWith('eval-v2-'))job.result=result;
     job.status='completed';
    }catch(err){

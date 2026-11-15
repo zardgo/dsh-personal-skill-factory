@@ -2,6 +2,7 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
   const [data,setData]=React.useState(null);
   const [busy,setBusy]=React.useState(false);
   const [message,setMessage]=React.useState('');
+  const [planProgress,setPlanProgress]=React.useState(null);
   const [kind,setKind]=React.useState('business-task');
   const [title,setTitle]=React.useState('');
   const [text,setText]=React.useState('');
@@ -21,14 +22,15 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
   React.useEffect(()=>{if(initialSourceId)setSelected(old=>[...new Set([...old,initialSourceId])]);},[initialSourceId]);
   async function action(fn) {
     if(lock.current)return;
-    lock.current=true;setBusy(true);setMessage('');
+    lock.current=true;setBusy(true);setMessage('');setPlanProgress(null);
     try{await fn();await reload();}catch(e){setMessage(e.message);}
     finally{lock.current=false;setBusy(false);}
   }
   async function job(operation, args, slug) {
     if(!sent||!choice)throw Error('请先选择模型并确认发送');
     const task=await call('/job-start',{...JSON.parse(choice),...args,operation,slug,allowModelSend:true,cwd:scope.trim()||undefined});
-    return (await waitForJob(task.id)).result;
+    return (await waitForJob(task.id,operation==='architect-plan'?1800000:540000,
+      p=>setPlanProgress(previous=>JSON.stringify(previous)===JSON.stringify(p)?previous:p))).result;
   }
   const plan=data?.plans?.[planId];
   const caps=plan?.capabilityIds?.map(id=>data.capabilities[id])||[];
@@ -125,6 +127,10 @@ function ArchitectPanel({call,waitForJob,models,onOpen,initialSourceId}) {
       b.generation?.status==='needs-review'?h('pre',{className:'sf-code'},JSON.stringify(b.generation.issues,null,2)):null)),
     plan?.status==='pending'?h('div',null,h('label',{className:'sf-confirm'},h('input',{type:'checkbox',checked:accepted,onChange:e=>setAccepted(e.target.checked)}),'已审核能力决策、蓝图和评测预期'),
       btn('批准当前架构与蓝图',()=>action(()=>call('/architecture/approve',{planId,revision:plan.revision,approved:true})),'primary',busy||!accepted)):null,
-    busy?h('p',{role:'status'},'工作台处理中，已完成结果会自动保存。'):null,
+    busy?h('p',{role:'status'},planProgress?.stage==='discover'
+      ?`正在分批理解资料：第 ${planProgress.completed}/${planProgress.total} 批。已完成批次会保存，失败后可继续。`
+      :planProgress?.stage==='reconcile'?'正在跨批次归并任务，避免按章节生成重复 Skill。'
+      :planProgress?.stage==='portfolio'?'正在全局审查能力架构与已有 Skill 资产。'
+      :'工作台处理中，已完成结果会自动保存。'):null,
     message?h('p',{role:'status'},message):null);
 }
